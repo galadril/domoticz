@@ -1,5 +1,5 @@
 define(['app', 'livesocket'], function (app) {
-	app.controller('FloorplanController', function ($scope, $rootScope, $location, $window, $http, $interval, $timeout, $compile, permissions, livesocket) {
+	app.controller('FloorplanController', function ($scope, $rootScope, $location, $window, $http, $interval, $compile, permissions, livesocket) {
 
 		$scope.floorPlans;
 		$scope.FloorplanCount;
@@ -7,11 +7,27 @@ define(['app', 'livesocket'], function (app) {
 		$scope.browser = "unknown";
 		$scope.lastUpdateTime = 0;
 		$scope.isScrolling = false;		// used on tablets & phones
-		$scope.pendingScroll = false;	// used on tablets & phones
 		$scope.lastTouch = 0;			// used on tablets & phones
 		$scope.lastTouchX = 0;			// used on tablets & phones
 		$scope.lastTouchY = 0;			// used on tablets & phones
+		$scope.touchStartX = 0;			// used on tablets & phones
+		$scope.touchStartY = 0;			// used on tablets & phones
 		var refreshDebounceTimer = null;
+
+		// Returns the actual bottom of the visible navbar content in viewport pixels.
+		// The brand logo image overflows below the navbar's own layout box, so we
+		// check all img elements inside .brand and use the deepest one found.
+		function getNavbarBottom() {
+			var nav = document.querySelector('.navbar.navbar-fixed-top');
+			if (!nav) { return 0; }
+			var bottom = nav.getBoundingClientRect().bottom;
+			var imgs = nav.querySelectorAll('.brand img');
+			for (var i = 0; i < imgs.length; i++) {
+				var b = imgs[i].getBoundingClientRect().bottom;
+				if (b > bottom) { bottom = b; }
+			}
+			return Math.ceil(bottom);
+		}
 
 		$scope.makeHTMLnode = function (tag, attrs) {
 			var el = document.createElement(tag);
@@ -19,53 +35,52 @@ define(['app', 'livesocket'], function (app) {
 			return el;
 		}
 
-		function FPtouchstart(e) { $scope.isScrolling = false; };
+		function FPtouchstart(e) {
+			$scope.isScrolling = false;
+			var touch = e.changedTouches ? e.changedTouches[0] : null;
+			$scope.touchStartX = touch ? touch.pageX : 0;
+			$scope.touchStartY = touch ? touch.pageY : 0;
+		};
 		function FPtouchmove(e) { $scope.isScrolling = true; };
 		function FPtouchend(e) {
-			//  Handle events on navigation elements
 			if (e.target.getAttribute('related') != null) {
 				$("#BulletImages").children().css({ 'display': 'none' });
 				e.preventDefault();
 				ScrollFloorplans(e.target.getAttribute('related'));
+				return;
 			}
-			else
-			// otherwise do scrolling stuff
-			{
-				if ($scope.isScrolling == true) {
-					$scope.isScrolling = false;
-					$scope.pendingScroll = true;
-					$timeout(function () {
-						if (($scope.isScrolling == false) && ($scope.pendingScroll == true)) {
-							$scope.pendingScroll = false;
-							var nearestFP = $('.imageparent:first');
-							$('.imageparent').each(function () {
-								var offset = Math.abs(window.pageXOffset - $(this).offset().left);
-								if (offset < Math.abs(window.pageXOffset - nearestFP.offset().left)) {
-									nearestFP = $(this);
-								}
-							});
-							ScrollFloorplans(nearestFP.attr('id'), true);
-						}
-					}, 50);
+
+			var touch = e.changedTouches ? e.changedTouches[0] : null;
+			if (!touch) return;
+
+			var endX   = touch.pageX;
+			var endY   = touch.pageY;
+			var deltaX = endX - $scope.touchStartX;
+			var deltaY = endY - $scope.touchStartY;
+
+			var SWIPE_THRESHOLD = 50;
+
+			if ($scope.isScrolling && Math.abs(deltaX) > SWIPE_THRESHOLD && Math.abs(deltaX) > Math.abs(deltaY)) {
+				if (deltaX < 0 && $scope.actFloorplan < $scope.FloorplanCount - 1) {
+					$scope.actFloorplan++;
+					ScrollFloorplans($scope.floorPlans[$scope.actFloorplan].tagName);
+				} else if (deltaX > 0 && $scope.actFloorplan > 0) {
+					$scope.actFloorplan--;
+					ScrollFloorplans($scope.floorPlans[$scope.actFloorplan].tagName);
 				}
-				else  // if not scrolling look for double tap
-				{
-					var touch = e.changedTouches ? e.changedTouches[0] : null;
-					var touchX = touch ? touch.pageX : 0;
-					var touchY = touch ? touch.pageY : 0;
-					var delta = (new Date()).getTime() - $scope.lastTouch;
-					var delay = 500;
-					var dx = touchX - $scope.lastTouchX;
-					var dy = touchY - $scope.lastTouchY;
-					var distance = Math.sqrt(dx * dx + dy * dy);
-					if (delta < delay && delta > 0 && distance < 50) {
-						$scope.doubleClick();
-					}
-					$scope.lastTouch = (new Date()).getTime();
-					$scope.lastTouchX = touchX;
-					$scope.lastTouchY = touchY;
+			} else if (!$scope.isScrolling) {
+				var timeDelta = (new Date()).getTime() - $scope.lastTouch;
+				var dx = endX - $scope.lastTouchX;
+				var dy = endY - $scope.lastTouchY;
+				var distance = Math.sqrt(dx * dx + dy * dy);
+				if (timeDelta < 500 && timeDelta > 0 && distance < 50) {
+					$scope.doubleClick();
 				}
+				$scope.lastTouch  = (new Date()).getTime();
+				$scope.lastTouchX = endX;
+				$scope.lastTouchY = endY;
 			}
+			$scope.isScrolling = false;
 		};
 
 		ScrollFloorplans = function (tagName, animate) {
@@ -165,24 +180,44 @@ define(['app', 'livesocket'], function (app) {
 			return -1;
 		}
 
+		function positionBulletGroup() {
+			var bullets = $("#BulletGroup:first");
+			if (bullets.length == 0 || $scope.FloorplanCount <= 1) return;
+			var bottomMargin = ($("#copyright").css('display') == 'none') ? 10 : $("#copyright").height() + 10;
+			var vv = $window.visualViewport;
+			if (typeof vv != 'undefined' && vv != null) {
+				// BulletGroup is position:fixed, so it is anchored to the layout viewport.
+				// While the page is pinch zoomed the visual viewport is smaller and offset,
+				// which moves the dots out of sight, so map the position onto it instead.
+				bullets.css("left", vv.offsetLeft + (vv.width - bullets.outerWidth()) / 2)
+					.css("top", vv.offsetTop + vv.height - bullets.outerHeight() - bottomMargin)
+					.css("bottom", "auto")
+					.css("display", "inline");
+			}
+			else {
+				bullets.css("left", ($window.innerWidth - bullets.width()) / 2)
+					.css("top", "auto")
+					.css("bottom", bottomMargin)
+					.css("display", "inline");
+			}
+		}
+
 		$scope.FloorplanResize = function () {
 			if (typeof $("#floorplancontent") != 'undefined') {
 				var wrpHeight = $window.innerHeight;
 				// when the small menu bar is displayed main-view jumps to the top so force it down
 				if ($(".navbar").css('display') != 'none') {
-					$("#floorplancontent").offset({ top: $(".navbar").height() });
-					wrpHeight = $window.innerHeight - $("#floorplancontent").offset().top - (($("#copyright").css('display') == 'none') ? 0 : $("#copyright").height()) - 52;
+					var navBottom = getNavbarBottom();
+					$("#floorplancontent").offset({ top: navBottom });
+					var copyrightH = ($("#copyright").css('display') == 'none') ? 0 : ($("#copyright").outerHeight() || 0);
+					wrpHeight = $window.innerHeight - navBottom - copyrightH;
 				}
 				else {
 					$("#floorplancontent").offset({ top: 0 });
 				}
 				$("#floorplancontent").width($("#main-view").width()).height(wrpHeight);
 				$(".imageparent").each(function (i) { $("#" + $(this).attr('id') + '_svg').width($("#floorplancontent").width()).height(wrpHeight); });
-				if ($scope.FloorplanCount > 1) {
-					$("#BulletGroup:first").css("left", ($window.innerWidth - $("#BulletGroup:first").width()) / 2)
-						.css("bottom", ($("#copyright").css('display') == 'none') ? 10 : $("#copyright").height() + 10)
-						.css("display", "inline");
-				}
+				positionBulletGroup();
 				if (typeof $scope.actFloorplan != 'undefined') ScrollFloorplans($scope.floorPlans[$scope.actFloorplan].tagName, false);
 			}
 		}
@@ -581,6 +616,10 @@ define(['app', 'livesocket'], function (app) {
 			});
 
 			$(window).resize(function () { $scope.FloorplanResize(); });
+			if (typeof $window.visualViewport != 'undefined' && $window.visualViewport != null) {
+				$window.visualViewport.addEventListener('resize', positionBulletGroup);
+				$window.visualViewport.addEventListener('scroll', positionBulletGroup);
+			}
 
 			document.addEventListener('touchstart', FPtouchstart, { passive: true });
 			document.addEventListener('touchmove', FPtouchmove, { passive: true });
@@ -593,6 +632,10 @@ define(['app', 'livesocket'], function (app) {
 					document.removeEventListener('keydown', FPkeydown);
 					$(".fp-nav-arrow").hide();
 					$(window).off('resize');
+					if (typeof $window.visualViewport != 'undefined' && $window.visualViewport != null) {
+						$window.visualViewport.removeEventListener('resize', positionBulletGroup);
+						$window.visualViewport.removeEventListener('scroll', positionBulletGroup);
+					}
 					$("body").off('pageexit').css('overflow', '');
 
 					//Make vertical scrollbar disappear
@@ -601,7 +644,7 @@ define(['app', 'livesocket'], function (app) {
 
 					//Move nav bar with Back and Report button down
 					if ($(".navbar").css('display') != 'none') {
-						$("#floorplancontent").offset({ top: $(".navbar").height() });
+						$("#floorplancontent").offset({ top: getNavbarBottom() });
 					}
 					else {
 						$("#floorplancontent").offset({ top: 0 });

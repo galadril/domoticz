@@ -150,6 +150,13 @@ namespace http
 					urights = (int)m_users[iUser].userrights;
 					Username = m_users[iUser].Username;
 				}
+				else
+				{
+					// Synthetic users (e.g. access tokens "at:<id>") are not in m_users;
+					// use the rights resolved from JWT auth instead.
+					if (session.rights >= URIGHTS_VIEWER && session.rights <= URIGHTS_ADMIN)
+						urights = (int)session.rights;
+				}
 			}
 
 			// Check if user has the proper access rights for the command (so we don't have to check this in every command)
@@ -205,8 +212,9 @@ namespace http
 							root["result"][ii]["Name"] = sd[1];
 							ii++;
 						}
-						root["status"] = "OK";
 					}
+					// having no sub devices is a normal situation, not an error
+					root["status"] = "OK";
 					break;
 				}
 				case "getscenedevices"_sh:
@@ -279,8 +287,9 @@ namespace http
 							root["result"][ii]["SubType"] = RFX_Type_SubType_Desc(devType, subType);
 							ii++;
 						}
-						root["status"] = "OK";
 					}
+					// an empty scene/group is a normal situation, not an error
+					root["status"] = "OK";
 					break;
 				}
 				case "getmanualhardware"_sh:	// used by Add Manual Light/Switch dialog
@@ -3170,9 +3179,7 @@ namespace http
 							}
 							RemoveUsersSessions(result[0][0], session);
 
-							m_sql.safe_query("DELETE FROM SharedDevices WHERE (SharedUserID == '%q')", idx.c_str());
-
-							m_sql.safe_query("DELETE FROM Users WHERE (ID == '%q')", idx.c_str());
+							m_sql.DeleteUser(idx);
 						}
 					}
 					LoadUsers();

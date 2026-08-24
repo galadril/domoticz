@@ -63,8 +63,8 @@ define([
             },
             controllerAs:     'ctrl',
             bindToController: true,
-            controller: ['$scope', '$http', '$interval', '$rootScope', '$q',
-                function($scope, $http, $interval, $rootScope, $q) {
+            controller: ['$scope', '$http', '$rootScope', '$q',
+                function($scope, $http, $rootScope, $q) {
                 var ctrl = this;
                 ctrl.temperature   = '\u2014';
                 ctrl.humidity      = null;
@@ -83,7 +83,6 @@ define([
                 ctrl.displayStyle  = 'compact';
 
                 var cancelTokens = [];
-                var nightTimer   = null;
 
                 function computeIsNight(sunriseStr, sunsetStr) {
                     var toMinutes = function(s) {
@@ -111,12 +110,15 @@ define([
                 ctrl.getWeatherScene = function(forecastStr) {
                     if (!forecastStr) { return 'fcw-cloudy'; }
                     var s = forecastStr.toLowerCase();
-                    if (s.indexOf('heavy rain') >= 0 || s.indexOf('thunderstorm') >= 0) { return 'fcw-heavyrain'; }
+                    if (s.indexOf('thunderstorm') >= 0) { return 'fcw-thunderstorm'; }
+                    if (s.indexOf('heavy rain') >= 0) { return 'fcw-heavyrain'; }
                     if (s.indexOf('rain') >= 0 || s.indexOf('shower') >= 0) { return 'fcw-rain'; }
                     if (s.indexOf('heavy snow') >= 0 || s.indexOf('blizzard') >= 0) { return 'fcw-heavysnow'; }
                     if (s.indexOf('snow') >= 0 || s.indexOf('sleet') >= 0) { return 'fcw-snow'; }
+                    if (s.indexOf('unstable') >= 0) { return 'fcw-cloudy'; }
+                    if (s.indexOf('stable') >= 0) { return 'fcw-sunny'; }
                     if (s.indexOf('sunny') >= 0 || (s.indexOf('clear') >= 0 && s.indexOf('night') < 0)) { return 'fcw-sunny'; }
-                    if (s.indexOf('partly') >= 0 || s.indexOf('scattered') >= 0) { return 'fcw-partlycloudy'; }
+                    if (s.indexOf('partly') >= 0 || s.indexOf('scattered') >= 0 || s.indexOf('some clouds') >= 0) { return 'fcw-partlycloudy'; }
                     if (s.indexOf('night') >= 0) { return 'fcw-night'; }
                     if (s.indexOf('cloud') >= 0 || s.indexOf('overcast') >= 0) { return 'fcw-cloudy'; }
                     return 'fcw-cloudy';
@@ -212,19 +214,17 @@ define([
                     }
                 });
 
-                var timer = $interval(load, 60000);
-
-                // Re-evaluate isNight every minute (sunrise/sunset data loaded once on init)
-                nightTimer = $interval(function() {
-                    if (ctrl.sunrise && ctrl.sunset) {
-                        ctrl.isNight = computeIsNight(ctrl.sunrise, ctrl.sunset);
+                // time_update fires every ~10s — use it to keep isNight current
+                $scope.$on('time_update', function(e, data) {
+                    if (data && data.sunrise && data.sunset) {
+                        ctrl.sunrise = data.sunrise;
+                        ctrl.sunset  = data.sunset;
+                        ctrl.isNight = computeIsNight(data.sunrise, data.sunset);
                     }
-                }, 60000);
+                });
 
                 $scope.$on('$destroy', function() {
                     cancelAll();
-                    $interval.cancel(timer);
-                    if (nightTimer) { $interval.cancel(nightTimer); }
                 });
                 $scope.$on('dd:widget:refresh', load);
 

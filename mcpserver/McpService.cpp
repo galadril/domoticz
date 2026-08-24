@@ -50,6 +50,34 @@
 // ISO 8601 date strings (YYYY-MM-DD) compare correctly with < / > because
 // lexicographic order matches chronological order for this format.
 static constexpr const char *MCP_PROTOCOL_VERSION = "2025-06-18";
+static constexpr int MCP_LIST_PAGE_SIZE = 50;
+
+static const std::unordered_map<std::string, http::server::_eUserRights> s_toolMinRights = {
+    { "set_switch_state",       http::server::URIGHTS_SWITCHER },
+    { "toggle_switch_state",    http::server::URIGHTS_SWITCHER },
+    { "set_dimmer_level",       http::server::URIGHTS_SWITCHER },
+    { "control_blinds",         http::server::URIGHTS_SWITCHER },
+    { "set_color_brightness",   http::server::URIGHTS_SWITCHER },
+    { "set_color_temperature",  http::server::URIGHTS_SWITCHER },
+    { "set_setpoint_value",     http::server::URIGHTS_SWITCHER },
+    { "switch_scene",           http::server::URIGHTS_SWITCHER },
+    { "add_log_message",        http::server::URIGHTS_SWITCHER },
+    { "send_notification",      http::server::URIGHTS_SWITCHER },
+    { "rename_device",          http::server::URIGHTS_ADMIN },
+    { "delete_device",          http::server::URIGHTS_ADMIN },
+    { "hide_device",            http::server::URIGHTS_ADMIN },
+    { "create_sensor",          http::server::URIGHTS_ADMIN },
+    { "create_virtual_sensor",  http::server::URIGHTS_ADMIN },
+    { "create_device",          http::server::URIGHTS_ADMIN },
+    { "update_device_value",    http::server::URIGHTS_ADMIN },
+    { "add_user_variable",      http::server::URIGHTS_ADMIN },
+    { "update_user_variable",   http::server::URIGHTS_ADMIN },
+    { "delete_user_variable",   http::server::URIGHTS_ADMIN },
+    { "create_event",           http::server::URIGHTS_ADMIN },
+    { "update_event",           http::server::URIGHTS_ADMIN },
+    { "delete_event",           http::server::URIGHTS_ADMIN },
+    { "set_security_status",    http::server::URIGHTS_ADMIN },
+};
 
 extern http::server::CWebServerHelper m_webservers;
 extern CLogger _log;
@@ -58,6 +86,37 @@ static std::string McpGetSessionIdFromRequest(const http::server::request& req)
 {
 	const char* hdr = req.get_req_header(&req, "Mcp-Session-Id");
 	return hdr ? std::string(hdr) : std::string{};
+}
+
+static bool McpIsValidSessionId(const std::string& sid)
+{
+	if (sid.empty() || sid.size() > 64)
+		return false;
+	return sid.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+}
+
+static std::string McpGetSessionIdFromQuery(const http::server::request& req)
+{
+	// Parse ?sessionId=xxx or &sessionId=xxx from the URI query string
+	const std::string& uri = req.uri;
+	auto qpos = uri.find('?');
+	if (qpos == std::string::npos)
+		return {};
+	std::string query = uri.substr(qpos + 1);
+	const std::string key = "sessionId=";
+	auto kpos = query.find(key);
+	if (kpos == std::string::npos)
+		return {};
+	std::string value = query.substr(kpos + key.size());
+	auto amp = value.find('&');
+	if (amp != std::string::npos)
+		value = value.substr(0, amp);
+	if (!McpIsValidSessionId(value))
+	{
+		_log.Debug(DEBUG_WEBSERVER, "MCP: Rejecting malformed sessionId in query: %s", uri.c_str());
+		return {};
+	}
+	return value;
 }
 
 static bool McpIsValidSubscriptionUri(const std::string& uri)
@@ -96,21 +155,41 @@ extern std::string szAppDate;
 extern time_t m_StartTime;
 extern bool g_bLlmMCPSupport;
 
+namespace mcp
+{
+	struct McpProgressCtx
+	{
+		std::string sid;
+		std::string progressToken;
+	};
+	extern thread_local McpProgressCtx tl_progressCtx;
+}
+
 namespace http
 {
 	namespace server
 	{
+		void CWebServer::OptionsMcp(WebEmSession& session, const request& req, reply& rep)
+		{
+			rep.status = http::server::reply::ok;
+			http::server::reply::add_header(&rep, "Content-Length", "0");
+			http::server::reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+			http::server::reply::add_header(&rep, "Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS");
+			http::server::reply::add_header(&rep, "Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID");
+			http::server::reply::add_header(&rep, "Access-Control-Max-Age", "86400");
+		}
+
+		static void ProcessSingleRequest(
+			const request& req,
+			const Json::Value& jsonRequest,
+			Json::Value& jsonRPCRep,
+			std::string& newSessionId,
+			WebEmSession& session,
+			bool isLegacySse,
+			const std::string& querySid);
+
 		void CWebServer::PostMcp(WebEmSession &session, const request &req, reply &rep)
 		{
-			if (req.method == "OPTIONS")
-			{
-				rep.status = reply::ok;
-				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
-				reply::add_header(&rep, "Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS");
-				reply::add_header(&rep, "Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID");
-				reply::add_header(&rep, "Access-Control-Max-Age", "86400");
-				return;
-			}
 			if (g_bLlmMCPSupport == false)
 			{
 				_log.Log(LOG_ERROR, "MCP: MCP access requested (IP: %s), but service disabled with -nomcp !", session.remote_host.c_str());
@@ -174,7 +253,9 @@ namespace http
 			if (req.get_req_header(&req, "Accept") != nullptr)
 			{
 				std::string accept = req.get_req_header(&req, "Accept");
-				if (accept.find("text/event-stream") == std::string::npos && accept.find("application/json") == std::string::npos)
+				if (accept.find("text/event-stream") == std::string::npos &&
+				    accept.find("application/json") == std::string::npos &&
+				    accept.find("*/*") == std::string::npos)
 				{
 					_log.Debug(DEBUG_WEBSERVER, "MCP: Invalid Accept header: %s", accept.c_str());
 					rep = reply::stock_reply(reply::bad_request);
@@ -196,9 +277,9 @@ namespace http
 				}
 			}
 
-			Json::Value jsonRequest;
+			Json::Value jsonRoot;
 			std::string sParseErr;
-			if (!mcp::validRPC(req.content, jsonRequest, sParseErr))
+			if (!ParseJSon(req.content, jsonRoot, &sParseErr))
 			{
 				_log.Debug(DEBUG_WEBSERVER, "MCP: Invalid JSON-RPC request: %s", sParseErr.c_str());
 				Json::Value errRep;
@@ -212,68 +293,227 @@ namespace http
 				return;
 			}
 
-			//_log.Debug(DEBUG_RECEIVED, "MCP: Parsed JSON Request content: %s", jsonRequest.toStyledString().c_str());
+			//_log.Debug(DEBUG_RECEIVED, "MCP: Parsed JSON Request content: %s", jsonRoot.toStyledString().c_str());
 
-			// Check if the method is supported and handle it
+			// Detect legacy SSE mode: client uses ?sessionId= query param instead of Mcp-Session-Id header
+			std::string querySid = McpGetSessionIdFromQuery(req);
+			bool isLegacySse = !querySid.empty();
+
+			auto reply202 = [&rep]() {
+				rep = reply::stock_reply(reply::accepted);
+				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+				reply::add_header(&rep, "Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS");
+				reply::add_header(&rep, "Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Last-Event-ID");
+			};
+
+			if (jsonRoot.isArray())
+			{
+				if (jsonRoot.empty())
+				{
+					Json::Value errRep;
+					errRep["jsonrpc"] = "2.0";
+					errRep["id"] = Json::Value(Json::nullValue);
+					errRep["error"]["code"] = mcp::JSONRPC_INVALID_REQUEST;
+					errRep["error"]["message"] = "Empty batch";
+					Json::Value errArray(Json::arrayValue);
+					errArray.append(errRep);
+					rep.content = JSonToRawString(errArray);
+					rep.status = reply::bad_request;
+					reply::add_header(&rep, "Content-Type", "application/json");
+					reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+					return;
+				}
+
+				Json::Value responses(Json::arrayValue);
+				std::string newSessionId;
+
+				for (Json::ArrayIndex i = 0; i < jsonRoot.size(); ++i)
+				{
+					const Json::Value& item = jsonRoot[i];
+					if (!item.isObject())
+					{
+						Json::Value errRep;
+						errRep["jsonrpc"] = "2.0";
+						errRep["id"] = Json::Value(Json::nullValue);
+						errRep["error"]["code"] = mcp::JSONRPC_INVALID_REQUEST;
+						errRep["error"]["message"] = "Request item must be an object";
+						if (isLegacySse)
+							CMcpSessionRegistry::Instance().SendToSession(querySid, JSonToRawString(errRep));
+						else
+							responses.append(errRep);
+						continue;
+					}
+
+					Json::Value itemRep;
+					std::string itemNewSid;
+					ProcessSingleRequest(req, item, itemRep, itemNewSid, session, isLegacySse, querySid);
+
+					if (itemRep.isNull())
+						continue;
+
+					if (isLegacySse)
+					{
+						CMcpSessionRegistry::Instance().SendToSession(querySid, JSonToRawString(itemRep));
+					}
+					else
+					{
+						responses.append(itemRep);
+						if (!itemNewSid.empty())
+							newSessionId = itemNewSid;
+					}
+				}
+
+				if (isLegacySse)
+				{
+					reply202();
+					return;
+				}
+
+				if (responses.empty())
+				{
+					// All items were notifications
+					reply202();
+					return;
+				}
+
+				rep.content = JSonToRawString(responses);
+				rep.status = reply::ok;
+				reply::add_header(&rep, "Content-Type", "application/json");
+				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+				reply::add_header(&rep, "Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version");
+				if (!newSessionId.empty())
+					reply::add_header(&rep, "Mcp-Session-Id", newSessionId.c_str());
+				return;
+			}
+
+			if (!jsonRoot.isObject())
+			{
+				Json::Value errRep;
+				errRep["jsonrpc"] = "2.0";
+				errRep["id"] = Json::Value(Json::nullValue);
+				errRep["error"]["code"] = mcp::JSONRPC_INVALID_REQUEST;
+				errRep["error"]["message"] = "Invalid Request";
+				rep.content = JSonToRawString(errRep);
+				rep.status = reply::bad_request;
+				reply::add_header(&rep, "Content-Type", "application/json");
+				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+				return;
+			}
+
+			// Single request object
+			Json::Value jsonRPCRep;
+			std::string newSessionId;
+			ProcessSingleRequest(req, jsonRoot, jsonRPCRep, newSessionId, session, isLegacySse, querySid);
+
+			if (jsonRPCRep.isNull())
+			{
+				// Notification: no response
+				reply202();
+				return;
+			}
+
+			if (isLegacySse)
+			{
+				// Legacy SSE: send result via the SSE stream and return 202 Accepted
+				CMcpSessionRegistry::Instance().SendToSession(querySid, JSonToRawString(jsonRPCRep));
+				reply202();
+			}
+			else
+			{
+				// Streamable HTTP: return result directly in the POST response body
+				rep.content = JSonToRawString(jsonRPCRep);
+				rep.status = reply::ok;
+				reply::add_header(&rep, "Content-Type", "application/json");
+				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+				reply::add_header(&rep, "Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version");
+				if (!newSessionId.empty())
+					reply::add_header(&rep, "Mcp-Session-Id", newSessionId.c_str());
+			}
+			//reply::add_header(&rep, "Cache-Control", "no-cache");
+			//reply::add_header(&rep, "Connection", "keep-alive");
+		}
+
+		static void ProcessSingleRequest(
+			const request& req,
+			const Json::Value& jsonRequest,
+			Json::Value& jsonRPCRep,
+			std::string& newSessionId,
+			WebEmSession& session,
+			bool isLegacySse,
+			const std::string& querySid)
+		{
+			jsonRPCRep = Json::Value::null;
+			newSessionId.clear();
+
+			Json::Value requestId = Json::Value(Json::nullValue);
+			if (jsonRequest.isMember("id"))
+				requestId = jsonRequest["id"];
+
+			if (!jsonRequest.isObject() || !jsonRequest.isMember("method") || !jsonRequest["method"].isString()
+			    || !jsonRequest.isMember("jsonrpc") || jsonRequest["jsonrpc"].asString() != "2.0")
+			{
+				jsonRPCRep["jsonrpc"] = "2.0";
+				jsonRPCRep["id"] = requestId;
+				jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_REQUEST;
+				jsonRPCRep["error"]["message"] = "Invalid Request";
+				return;
+			}
+
 			std::string sReqMethod = jsonRequest["method"].asString();
 			_log.Debug(DEBUG_WEBSERVER, "MCP: Request method: %s", sReqMethod.c_str());
 
+			if (!jsonRequest.isMember("id"))
+			{
+				_log.Debug(DEBUG_WEBSERVER, "MCP: Handling notification %s (do nothing).", sReqMethod.c_str());
+				// jsonRPCRep remains null — caller skips this entry
+				return;
+			}
+
 			if (sReqMethod != "initialize")
 			{
-				std::string reqSid = McpGetSessionIdFromRequest(req);
+				std::string reqSid = isLegacySse ? querySid : McpGetSessionIdFromRequest(req);
 				if (reqSid.empty())
 				{
-					rep = reply::stock_reply(reply::bad_request);
+					jsonRPCRep["jsonrpc"] = "2.0";
+					jsonRPCRep["id"] = requestId;
+					jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_REQUEST;
+					jsonRPCRep["error"]["message"] = "Missing session";
 					return;
 				}
 				bool found = CMcpSessionRegistry::Instance().WithSession(
 					reqSid, [](CMcpSession& s) { s.lastActivity = time(nullptr); });
 				if (!found)
 				{
-					rep = reply::stock_reply(reply::not_found);
+					jsonRPCRep["jsonrpc"] = "2.0";
+					jsonRPCRep["id"] = requestId;
+					jsonRPCRep["error"]["code"] = mcp::MCP_RESOURCE_NOT_FOUND;
+					jsonRPCRep["error"]["message"] = "Session not found";
 					return;
 				}
 			}
 
-			if (sReqMethod.find("notifications/") != std::string::npos)
-			{
-				// Handle notifications, notifications don't have an ID and do not require a response
-				// MCP HTTP transport expects 202 Accepted (not 204 No Content) for notifications
-				_log.Debug(DEBUG_WEBSERVER, "MCP: Handling notification %s (do nothing).", sReqMethod.c_str());
-				rep = reply::stock_reply(reply::accepted);
-				return;
-			}
-
-			Json::Value jsonRPCRep;
 			jsonRPCRep["jsonrpc"] = "2.0";
 
-			// Check if the request has an ID
-			if (jsonRequest.isMember("id"))
+			if (requestId.isInt())
 			{
-				if (jsonRequest["id"].isInt())
-				{
-					jsonRPCRep["id"] = jsonRequest["id"].asInt();
-
-				}
-				else if (jsonRequest["id"].isString())
-				{
-					jsonRPCRep["id"] = jsonRequest["id"].asString();
-				}
-				else
-				{
-					_log.Debug(DEBUG_WEBSERVER, "MCP: Invalid ID type in request (must be number or string).");
-					rep = reply::stock_reply(reply::bad_request);
-					return;
-				}
+				jsonRPCRep["id"] = requestId.asInt();
+			}
+			else if (requestId.isString())
+			{
+				jsonRPCRep["id"] = requestId.asString();
+			}
+			else if (!requestId.isNull())
+			{
+				_log.Debug(DEBUG_WEBSERVER, "MCP: Invalid ID type in request (must be number or string).");
+				jsonRPCRep["id"] = Json::Value(Json::nullValue);
+				jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_REQUEST;
+				jsonRPCRep["error"]["message"] = "Invalid id type";
+				return;
 			}
 			else
 			{
-				_log.Debug(DEBUG_WEBSERVER, "MCP: Missing ID in request!");
-				rep = reply::stock_reply(reply::bad_request);
-				return;
-			};
-
-			std::string newSessionId;
+				jsonRPCRep["id"] = Json::Value(Json::nullValue);
+			}
 
 			if (sReqMethod == "ping")
 			{
@@ -283,6 +523,16 @@ namespace http
 			else if (sReqMethod == "initialize")
 			{
 				mcp::McpInitialize(jsonRequest, jsonRPCRep);
+				if (isLegacySse)
+				{
+					// Legacy SSE: session already created when GET established the SSE stream.
+					// Signal caller to send via SSE by leaving jsonRPCRep populated; caller handles transport.
+					// But for legacy SSE initialize, we need to send immediately and suppress the normal send path.
+					// We repurpose newSessionId as a sentinel to indicate this was already handled.
+					CMcpSessionRegistry::Instance().SendToSession(querySid, JSonToRawString(jsonRPCRep));
+					jsonRPCRep = Json::Value::null;
+					return;
+				}
 				newSessionId = CMcpSessionRegistry::Instance().CreateSession(session);
 			}
 			else if (sReqMethod == "tools/list")
@@ -291,7 +541,59 @@ namespace http
 			}
 			else if (sReqMethod == "tools/call")
 			{
-				mcp::McpToolsCall(jsonRequest, jsonRPCRep, session);
+				if (!jsonRequest.isMember("params") || !jsonRequest["params"].isMember("name"))
+				{
+					jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_PARAMETER;
+					jsonRPCRep["error"]["message"] = "Missing required parameter: params.name";
+				}
+				else
+				{
+					std::string toolName = jsonRequest["params"]["name"].asString();
+					auto rightsIt = s_toolMinRights.find(toolName);
+					std::string sid = isLegacySse ? querySid : McpGetSessionIdFromRequest(req);
+					if (rightsIt != s_toolMinRights.end())
+					{
+						http::server::_eUserRights sessionRights = http::server::URIGHTS_NONE;
+						CMcpSessionRegistry::Instance().WithSession(sid, [&sessionRights](CMcpSession& s) {
+							sessionRights = s.rights;
+						});
+						if (sessionRights < rightsIt->second)
+						{
+							jsonRPCRep["error"]["code"] = mcp::MCP_PERMISSION_DENIED;
+							jsonRPCRep["error"]["message"] = "Insufficient rights for tool: " + toolName;
+						}
+						else
+						{
+							std::string progressToken;
+							if (jsonRequest["params"].isMember("_meta") && jsonRequest["params"]["_meta"].isMember("progressToken"))
+							{
+								const Json::Value& tok = jsonRequest["params"]["_meta"]["progressToken"];
+								if (tok.isString())
+									progressToken = tok.asString();
+								else if (tok.isIntegral())
+									progressToken = std::to_string(tok.asInt64());
+							}
+							mcp::tl_progressCtx = { sid, progressToken };
+							mcp::McpToolsCall(jsonRequest, jsonRPCRep, session);
+							mcp::tl_progressCtx = {};
+						}
+					}
+					else
+					{
+						std::string progressToken;
+						if (jsonRequest["params"].isMember("_meta") && jsonRequest["params"]["_meta"].isMember("progressToken"))
+						{
+							const Json::Value& tok = jsonRequest["params"]["_meta"]["progressToken"];
+							if (tok.isString())
+								progressToken = tok.asString();
+							else if (tok.isIntegral())
+								progressToken = std::to_string(tok.asInt64());
+						}
+						mcp::tl_progressCtx = { sid, progressToken };
+						mcp::McpToolsCall(jsonRequest, jsonRPCRep, session);
+						mcp::tl_progressCtx = {};
+					}
+				}
 			}
 			else if (sReqMethod == "resources/list")
 			{
@@ -319,70 +621,85 @@ namespace http
 			}
 			else if (sReqMethod == "logging/setLevel")
 			{
-				std::string levelStr = jsonRequest["params"]["level"].asString();
-				std::string sid = McpGetSessionIdFromRequest(req);
-				if (!sid.empty())
+				std::string sid = isLegacySse ? querySid : McpGetSessionIdFromRequest(req);
+				http::server::_eUserRights sessionRights = http::server::URIGHTS_NONE;
+				CMcpSessionRegistry::Instance().WithSession(sid, [&sessionRights](CMcpSession& s) {
+					sessionRights = s.rights;
+				});
+				if (sessionRights < http::server::URIGHTS_ADMIN)
 				{
-					// Clamp at 3 (error): clients cannot enable info/debug Domoticz log forwarding.
-					int priority = std::max(McpLevelToPriority(levelStr), 3);
-					CMcpSessionRegistry::Instance().WithSession(
-						sid, [priority](CMcpSession& s) { s.minLogLevel = priority; });
+					jsonRPCRep["error"]["code"] = mcp::MCP_PERMISSION_DENIED;
+					jsonRPCRep["error"]["message"] = "logging/setLevel requires admin rights";
 				}
-				jsonRPCRep["result"] = Json::Value(Json::objectValue);
-			}
-			else if (sReqMethod == "resources/subscribe")
-			{
-				std::string uri = jsonRequest["params"]["uri"].asString();
-				if (uri.empty())
+				else if (!jsonRequest.isMember("params") || !jsonRequest["params"].isMember("level"))
 				{
 					jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_PARAMETER;
-					jsonRPCRep["error"]["message"] = "Missing uri parameter";
-				}
-				else if (!McpIsValidSubscriptionUri(uri))
-				{
-					jsonRPCRep["error"]["code"] = mcp::MCP_RESOURCE_NOT_FOUND;
-					jsonRPCRep["error"]["message"] = "Unknown resource URI: " + uri;
+					jsonRPCRep["error"]["message"] = "Missing required parameter: params.level";
 				}
 				else
 				{
-					std::string sid = McpGetSessionIdFromRequest(req);
+					std::string levelStr = jsonRequest["params"]["level"].asString();
+					int priority = McpLevelToPriority(levelStr);
 					if (!sid.empty())
 					{
 						CMcpSessionRegistry::Instance().WithSession(
-							sid, [&uri](CMcpSession& s) { s.subscribedUris.insert(uri); });
+							sid, [priority](CMcpSession& s) { s.minLogLevel = priority; });
 					}
 					jsonRPCRep["result"] = Json::Value(Json::objectValue);
 				}
 			}
+			else if (sReqMethod == "resources/subscribe")
+			{
+				if (!jsonRequest.isMember("params") || !jsonRequest["params"].isMember("uri"))
+				{
+					jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_PARAMETER;
+					jsonRPCRep["error"]["message"] = "Missing required parameter: params.uri";
+				}
+				else
+				{
+					std::string uri = jsonRequest["params"]["uri"].asString();
+					if (!McpIsValidSubscriptionUri(uri))
+					{
+						jsonRPCRep["error"]["code"] = mcp::MCP_RESOURCE_NOT_FOUND;
+						jsonRPCRep["error"]["message"] = "Unknown resource URI: " + uri;
+					}
+					else
+					{
+						std::string sid = isLegacySse ? querySid : McpGetSessionIdFromRequest(req);
+						if (!sid.empty())
+						{
+							CMcpSessionRegistry::Instance().WithSession(
+								sid, [&uri](CMcpSession& s) { s.subscribedUris.insert(uri); });
+						}
+						jsonRPCRep["result"] = Json::Value(Json::objectValue);
+					}
+				}
+			}
 			else if (sReqMethod == "resources/unsubscribe")
 			{
-				std::string uri = jsonRequest["params"]["uri"].asString();
-				std::string sid = McpGetSessionIdFromRequest(req);
-				if (!sid.empty())
+				if (!jsonRequest.isMember("params") || !jsonRequest["params"].isMember("uri"))
 				{
-					CMcpSessionRegistry::Instance().WithSession(
-						sid, [&uri](CMcpSession& s) { s.subscribedUris.erase(uri); });
+					jsonRPCRep["error"]["code"] = mcp::JSONRPC_INVALID_PARAMETER;
+					jsonRPCRep["error"]["message"] = "Missing required parameter: params.uri";
 				}
-				jsonRPCRep["result"] = Json::Value(Json::objectValue);
+				else
+				{
+					std::string uri = jsonRequest["params"]["uri"].asString();
+					std::string sid = isLegacySse ? querySid : McpGetSessionIdFromRequest(req);
+					if (!sid.empty())
+					{
+						CMcpSessionRegistry::Instance().WithSession(
+							sid, [&uri](CMcpSession& s) { s.subscribedUris.erase(uri); });
+					}
+					jsonRPCRep["result"] = Json::Value(Json::objectValue);
+				}
 			}
 			else
 			{
 				_log.Debug(DEBUG_WEBSERVER, "MCP: Unsupported method: %s", sReqMethod.c_str());
-				rep = reply::stock_reply(reply::not_implemented);
-				return;
+				jsonRPCRep["error"]["code"] = mcp::JSONRPC_METHOD_NOT_FOUND;
+				jsonRPCRep["error"]["message"] = "Method not found: " + sReqMethod;
 			}
-			// Set response content
-			rep.content = JSonToRawString(jsonRPCRep);
-			rep.status = reply::ok;
-
-			// Set headers
-			reply::add_header(&rep, "Content-Type", "application/json");	// "text/event-stream" is also an option if we want to support SSE
-			reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
-			reply::add_header(&rep, "Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version");
-			if (!newSessionId.empty())
-				reply::add_header(&rep, "Mcp-Session-Id", newSessionId.c_str());
-			//reply::add_header(&rep, "Cache-Control", "no-cache");
-			//reply::add_header(&rep, "Connection", "keep-alive");
 		}
 
 		void CWebServer::HandleMcpGet(WebEmSession& session, const request& req, reply& rep)
@@ -402,6 +719,7 @@ namespace http
 
 			if (sessionIdHdr != nullptr)
 			{
+				// Streamable HTTP: session already exists, look it up
 				bool found = CMcpSessionRegistry::Instance().WithSession(
 					sessionIdHdr, [](CMcpSession& s) { s.lastActivity = time(nullptr); });
 				if (!found)
@@ -410,28 +728,63 @@ namespace http
 					return;
 				}
 				mcpSessionId = sessionIdHdr;
+
+				// Build sse_context: "sessionId" or "sessionId:lastEventId"
+				const char* lastEventId = req.get_req_header(&req, "Last-Event-ID");
+				std::string sseContext = mcpSessionId;
+				if (lastEventId != nullptr)
+					sseContext = mcpSessionId + ":" + std::string(lastEventId);
+
+				rep.status = reply::sse_stream;
+				rep.sse_session = session;
+				rep.sse_context = sseContext;
+				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+
+				_log.Debug(DEBUG_WEBSERVER, "MCP: Opening SSE stream for client %s (session: %s)",
+				           session.remote_host.c_str(), mcpSessionId.c_str());
 			}
+			else
+			{
+				// Legacy SSE transport: no session header — create new session and send endpoint event
+				std::string newSid = CMcpSessionRegistry::Instance().CreateSession(session);
 
-			// Build sse_context: "sessionId" or "sessionId:lastEventId"
-			const char* lastEventId = req.get_req_header(&req, "Last-Event-ID");
-			std::string sseContext = mcpSessionId;
-			if (lastEventId != nullptr && !mcpSessionId.empty())
-				sseContext = mcpSessionId + ":" + std::string(lastEventId);
+				// Build endpoint URL from the actual local socket address (not the Host header,
+				// which is client-supplied and could be spoofed).
+				std::string endpointUrl = "http://" + session.local_host + ":" + session.local_port + "/mcp?sessionId=" + newSid;
 
-			rep.status = reply::sse_stream;
-			rep.sse_session = session;
-			rep.sse_context = sseContext;
-			reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+				// context format: "legacy|<sessionId>|<endpointUrl>"
+				// Use '|' as separator — ':' cannot be used because the URL contains colons.
+				std::string sseContext = "legacy|" + newSid + "|" + endpointUrl;
 
-			_log.Debug(DEBUG_WEBSERVER, "MCP: Opening SSE stream for client %s (session: %s)",
-			           session.remote_host.c_str(), mcpSessionId.empty() ? "(anon)" : mcpSessionId.c_str());
+				rep.status = reply::sse_stream;
+				rep.sse_session = session;
+				rep.sse_context = sseContext;
+				reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
+
+				_log.Debug(DEBUG_WEBSERVER, "MCP: Opening legacy SSE stream for client %s (new session: %s)",
+				           session.remote_host.c_str(), newSid.c_str());
+			}
 		}
 
 		void CWebServer::HandleMcpDelete(WebEmSession& /*session*/, const request& req, reply& rep)
 		{
 			const char* sessionIdHdr = req.get_req_header(&req, "Mcp-Session-Id");
 			if (sessionIdHdr != nullptr)
-				CMcpSessionRegistry::Instance().RemoveSession(sessionIdHdr);
+			{
+				std::string sid(sessionIdHdr);
+				auto sessionPtr = CMcpSessionRegistry::Instance().GetSession(sid);
+				CMcpSessionRegistry::Instance().RemoveSession(sid);
+				if (sessionPtr && sessionPtr->sseConnected && sessionPtr->sseWriter)
+				{
+					Json::Value notif;
+					notif["jsonrpc"] = "2.0";
+					notif["method"] = "notifications/message";
+					notif["params"]["level"] = "notice";
+					notif["params"]["logger"] = "mcp";
+					notif["params"]["data"]["message"] = "Session terminated by client";
+					sessionPtr->SendSseEvent(JSonToRawString(notif));
+				}
+			}
 			rep = reply::stock_reply(reply::ok);
 			reply::add_header(&rep, "Access-Control-Allow-Origin", "*");
 		}
@@ -443,6 +796,21 @@ namespace mcp		// Model Context Protocol
 {
 	static const char* const kVarTypeNames[] = { "Integer", "Float", "String", "Date", "Time" };
 	static const int kVarTypeCount = 5;
+
+	thread_local McpProgressCtx tl_progressCtx;
+
+	static void SendProgress(const std::string& sid, const std::string& token, int progress, int total, const std::string& message)
+	{
+		if (token.empty() || sid.empty()) return;
+		Json::Value notif;
+		notif["jsonrpc"] = "2.0";
+		notif["method"] = "notifications/progress";
+		notif["params"]["progressToken"] = token;
+		notif["params"]["progress"] = progress;
+		notif["params"]["total"] = total;
+		notif["params"]["message"] = message;
+		CMcpSessionRegistry::Instance().SendToSession(sid, JSonToRawString(notif));
+	}
 
 	static std::string buildSettingsText()
 	{
@@ -596,9 +964,11 @@ namespace mcp		// Model Context Protocol
 		{
 			"get_all_devices",
 			"List all devices",
-			"Return a list of all used devices in the system, optionally filtered by category. Use this to discover all available devices.",
+			"Return a list of devices in the system, optionally filtered by category and/or hardware. Use this to discover all available devices.",
 			{
 				{ "filter", "string", "Optional category filter: light, temp, weather, utility (leave empty for all)", false, {} },
+				{ "hw_idx", "integer", "Optional hardware IDX to return only devices belonging to that hardware adapter", false, {} },
+				{ "include_unused", "boolean", "Set to true to also include unused/disabled devices (default: false, only used devices are returned)", false, {} },
 			}
 		},
 		{
@@ -622,10 +992,19 @@ namespace mcp		// Model Context Protocol
 		},
 		{
 			"delete_device",
-			"Delete (hide) a device",
-			"Hide any device (switch, sensor, virtual, etc.) by setting its Used flag to 0. The device is not permanently deleted; it can be re-enabled. Use with caution.",
+			"Permanently delete a device",
+			"Permanently delete a device (switch, sensor, virtual, etc.) and all its associated data (logs, history, scene/timer references). This cannot be undone. To only hide a device, use hide_device instead.",
 			{
-				{ "name", "string", "Name of the device to hide/delete", false, {} },
+				{ "name", "string", "Name of the device to delete", false, {} },
+				{ "idx", "integer", "Device IDX (use either this or name)", false, {} },
+			}
+		},
+		{
+			"hide_device",
+			"Hide a device",
+			"Hide a device by setting its Used flag to 0. The device is not deleted and can be re-enabled later. Use delete_device to permanently remove a device.",
+			{
+				{ "name", "string", "Name of the device to hide", false, {} },
 				{ "idx", "integer", "Device IDX (use either this or name)", false, {} },
 			}
 		},
@@ -673,20 +1052,37 @@ namespace mcp		// Model Context Protocol
 		},
 		{
 			"get_sensor_history",
-			"Get history for any device",
-			"Retrieve history for any device: daily aggregated calendar data for sensors "
-			"(temperature, humidity, rain, wind, UV, percentage, fan, P1, energy, gas, water, counters), "
-			"or on/off/dim event log for switches and scenes. "
+			"Get daily-aggregated history for a sensor or the event log for a switch/text device",
+			"Retrieve DAILY-AGGREGATED (calendar) data for sensors going back weeks or months, "
+			"or the on/off/dim/text event log for switches and text/alert devices. "
+			"Use this for multi-day trends or long-term history. "
+			"For intraday data (today, last few hours, last 24 h) use get_sensor_short_log instead. "
 			"For sensors: specify 'days' or 'start_date'+'end_date'. "
-			"For switches/scenes: specify 'days'/'start_date'/'end_date' for date range, "
-			"or 'count' for last N events.",
+			"For switches/text devices: specify 'days'/'start_date'/'end_date' for a date range, "
+			"or 'count' for last N events. "
+			"For scene/group activation history use get_scene_history instead.",
 			{
-				{ "name", "string", "Name of the device or scene", false, {} },
+				{ "name", "string", "Name of the device", false, {} },
 				{ "idx", "integer", "Device IDX (use either this or name)", false, {} },
 				{ "days", "integer", "Number of days of history to retrieve (1-366, default 7 for sensors). Ignored if start_date/end_date provided.", false, {} },
 				{ "start_date", "string", "Start date in YYYY-MM-DD format (use with end_date for custom range)", false, {} },
 				{ "end_date", "string", "End date in YYYY-MM-DD format (use with start_date for custom range)", false, {} },
-				{ "count", "integer", "For switches/scenes: return last N log entries (1-500, default 50). When specified, date params are ignored.", false, {} },
+				{ "count", "integer", "For switches/text devices: return last N log entries (1-500). When specified, date params are ignored.", false, {} },
+			}
+		},
+		{
+			"get_sensor_short_log",
+			"Get recent/live sensor readings (last hours or N samples)",
+			"Retrieve recent high-resolution measurements at ~5-minute intervals from the short-log tables. "
+			"Use this for: today's data, last 24 hours, last N readings, live/recent sensor values. "
+			"Kept for a configurable number of days (default 1 day). "
+			"For multi-day or long-term history use get_sensor_history instead. "
+			"Not applicable to switches/text devices or scenes.",
+			{
+				{ "name",  "string",  "Name of the device", false, {} },
+				{ "idx",   "integer", "Device IDX (use either this or name)", false, {} },
+				{ "hours", "integer", "Time window in hours (1-168, default 24). Ignored if count is provided.", false, {} },
+				{ "count", "integer", "Return last N readings (1-1000). When specified, time window is ignored.", false, {} },
 			}
 		},
 		{
@@ -875,6 +1271,21 @@ namespace mcp		// Model Context Protocol
 			}
 		},
 		{
+			"get_scene_history",
+			"Get a scene or group's On/Off activation log",
+			"Retrieve the On/Off activation log for a scene or group, including the user/actor "
+			"that triggered each change (read from SceneLog). "
+			"Specify 'days'/'start_date'/'end_date' for a date range, or 'count' for the last N events.",
+			{
+				{ "scenename", "string", "Name of the scene or group", false, {} },
+				{ "scene_id", "integer", "Scene IDX (use either this or scenename)", false, {} },
+				{ "days", "integer", "Number of days of history (1-366, default 7). Ignored if start_date/end_date provided.", false, {} },
+				{ "start_date", "string", "Start date in YYYY-MM-DD format (use with end_date)", false, {} },
+				{ "end_date", "string", "End date in YYYY-MM-DD format (use with start_date)", false, {} },
+				{ "count", "integer", "Return last N log entries (1-500). When specified, date params are ignored.", false, {} },
+			}
+		},
+		{
 			"get_hardware",
 			"List all hardware",
 			"Return a list of all configured hardware adapters in Domoticz.",
@@ -931,9 +1342,37 @@ namespace mcp		// Model Context Protocol
 	{
 		_log.Debug(DEBUG_WEBSERVER, "MCP: Handling tools/list request.");
 
-		jsonRPCRep["result"]["tools"] = Json::Value(Json::arrayValue);
+		int offset = 0;
+		if (jsonRequest.isMember("params") && jsonRequest["params"].isMember("cursor"))
+		{
+			std::string cursorStr = jsonRequest["params"]["cursor"].asString();
+			if (!cursorStr.empty())
+			{
+				std::string decoded = base64_decode(cursorStr);
+				Json::Value cursorObj;
+				if (ParseJSon(decoded, cursorObj) && cursorObj.isMember("offset") && cursorObj["offset"].isInt())
+					offset = cursorObj["offset"].asInt();
+			}
+		}
+		if (offset < 0)
+			offset = 0;
+
+		Json::Value allTools(Json::arrayValue);
 		for (const auto &def : kToolDefinitions)
-			jsonRPCRep["result"]["tools"].append(mcp::buildToolSchema(def));
+			allTools.append(mcp::buildToolSchema(def));
+
+		int total = (int)allTools.size();
+		Json::Value page(Json::arrayValue);
+		for (int i = offset; i < std::min(offset + MCP_LIST_PAGE_SIZE, total); i++)
+			page.append(allTools[i]);
+		jsonRPCRep["result"]["tools"] = page;
+
+		if (offset + MCP_LIST_PAGE_SIZE < total)
+		{
+			Json::Value nextCursorObj;
+			nextCursorObj["offset"] = offset + MCP_LIST_PAGE_SIZE;
+			jsonRPCRep["result"]["nextCursor"] = base64_encode(JSonToRawString(nextCursorObj));
+		}
 	}
 
 	void McpToolsCall(const Json::Value &jsonRequest, Json::Value &jsonRPCRep, const http::server::WebEmSession &session)
@@ -955,13 +1394,14 @@ namespace mcp		// Model Context Protocol
 			"toggle_switch_state", "set_switch_state", "set_dimmer_level",
 			"control_blinds", "set_color_brightness", "set_color_temperature",
 			"set_setpoint_value", "switch_scene", "send_notification",
-			"add_log_message", "update_device_value"
+			"add_log_message"
 		};
 		static const std::unordered_set<std::string> kAdminTools = {
 			"create_sensor", "create_virtual_sensor", "create_device",
-			"rename_device", "delete_device",
+			"rename_device", "delete_device", "hide_device",
 			"add_user_variable", "update_user_variable", "delete_user_variable",
-			"create_event", "update_event", "delete_event"
+			"create_event", "update_event", "delete_event",
+			"update_device_value", "set_security_status"
 		};
 
 		if (kAdminTools.count(sMethodName) && session.rights < http::server::URIGHTS_ADMIN)
@@ -1006,16 +1446,19 @@ namespace mcp		// Model Context Protocol
 			{ "get_device",             getDevice },
 			{ "rename_device",          renameDevice },
 			{ "delete_device",          deleteDevice },
+			{ "hide_device",            hideDevice },
 			{ "create_sensor",          createVirtualSensor },
 			{ "create_virtual_sensor",  createVirtualSensor },
 			{ "create_device",          createVirtualSensor },
 			{ "update_device_value",    updateDeviceValue },
 			{ "get_sensor_history",     getSensorHistory },
+			{ "get_sensor_short_log",   getSensorShortLog },
 			{ "get_scenes",             getScenes },
 			{ "switch_scene",           switchScene },
 			{ "get_rooms",              getRooms },
 			{ "get_room_devices",       getRoomDevices },
 			{ "get_scene_devices",      getSceneDevices },
+			{ "get_scene_history",      getSceneHistory },
 			{ "get_user_variables",     getUserVariables },
 			{ "add_user_variable",      addUserVariable },
 			{ "update_user_variable",   updateUserVariable },
@@ -1070,142 +1513,77 @@ namespace mcp		// Model Context Protocol
 	{
 		_log.Debug(DEBUG_WEBSERVER, "MCP: Handling resources/list request.");
 
-		// Prepare the result for the resources/list method
-		jsonRPCRep["result"]["resources"] = Json::Value(Json::arrayValue);
-
-		// --- Aggregate resources (fixed, always present) ---
+		int offset = 0;
+		if (jsonRequest.isMember("params") && jsonRequest["params"].isMember("cursor"))
 		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://devices";
-			resource["name"] = "All Devices";
-			resource["title"] = "All Devices";
-			resource["description"] = "Summary of all used devices in the system";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://rooms";
-			resource["name"] = "Rooms";
-			resource["title"] = "Rooms";
-			resource["description"] = "All configured rooms/plans";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://scenes";
-			resource["name"] = "Scenes";
-			resource["title"] = "Scenes";
-			resource["description"] = "All scenes and groups";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://user-variables";
-			resource["name"] = "User Variables";
-			resource["title"] = "User Variables";
-			resource["description"] = "All user variables";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://events";
-			resource["name"] = "Event Scripts";
-			resource["title"] = "Event Scripts";
-			resource["description"] = "All automation event scripts";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://security";
-			resource["name"] = "Security";
-			resource["title"] = "Security";
-			resource["description"] = "Security panel status";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://settings";
-			resource["name"] = "Settings";
-			resource["title"] = "Settings";
-			resource["description"] = "System configuration (key subset)";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://log";
-			resource["name"] = "System Log";
-			resource["title"] = "System Log";
-			resource["description"] = "Recent system log entries";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://sensor-types";
-			resource["name"] = "Sensor Types";
-			resource["title"] = "Virtual Sensor Types";
-			resource["description"] = "All sensor types available for create_sensor / create_virtual_sensor, with their names and numeric mapped values";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://hardware";
-			resource["name"] = "Hardware";
-			resource["title"] = "Hardware";
-			resource["description"] = "All configured hardware instances with type, enabled status, and ID";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://notifications";
-			resource["name"] = "Notifications";
-			resource["title"] = "Notifications";
-			resource["description"] = "All configured device notifications with trigger conditions and target systems";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-		{
-			Json::Value resource;
-			resource["uri"] = "domoticz://timers";
-			resource["name"] = "Timers";
-			resource["title"] = "Timers";
-			resource["description"] = "All device and scene timers with schedule and command details";
-			resource["mimeType"] = "text/plain";
-			jsonRPCRep["result"]["resources"].append(resource);
-		}
-
-		// Add any available floorplans as resources too
-		auto result = m_sql.safe_query("SELECT ID, Name FROM Floorplans");
-		if (!result.empty())
-		{
-			for (const auto &row : result)
+			std::string cursorStr = jsonRequest["params"]["cursor"].asString();
+			if (!cursorStr.empty())
 			{
-				Json::Value resource;
-				std::string idx = row[0];
-				std::string sName = row[1];
-				resource["uri"] = "floorplan:///image/" + idx;
-				resource["name"] = sName;
-				resource["title"] = sName + " (Floorplan)";
-				resource["description"] = "A Floorplan called " + sName + " with IDX " + idx;
-				resource["mimeType"] = "image/*"; // unknown image type
-				Json::Value meta;
-				meta["idx"] = atoi(idx.c_str());
-				resource["_meta"] = meta;
-				jsonRPCRep["result"]["resources"].append(resource);
+				std::string decoded = base64_decode(cursorStr);
+				Json::Value cursorObj;
+				if (ParseJSon(decoded, cursorObj) && cursorObj.isMember("offset") && cursorObj["offset"].isInt())
+					offset = cursorObj["offset"].asInt();
 			}
 		}
+		if (offset < 0)
+			offset = 0;
 
-		//_log.Debug(DEBUG_WEBSERVER, "MCP: ResourcesList: Following resources offered:\n%s", jsonRPCRep.toStyledString().c_str());
-		_log.Debug(DEBUG_WEBSERVER, "MCP: ResourcesList: Number of resources offered: %d", jsonRPCRep["result"]["resources"].size());
+		Json::Value allResources(Json::arrayValue);
+
+		auto addResource = [&](const char* uri, const char* name, const char* title, const char* description, const char* mimeType) {
+			Json::Value resource;
+			resource["uri"] = uri;
+			resource["name"] = name;
+			resource["title"] = title;
+			resource["description"] = description;
+			resource["mimeType"] = mimeType;
+			allResources.append(resource);
+		};
+
+		addResource("domoticz://devices",        "All Devices",    "All Devices",         "Summary of all used devices in the system",                                                                    "text/plain");
+		addResource("domoticz://rooms",           "Rooms",          "Rooms",               "All configured rooms/plans",                                                                                   "text/plain");
+		addResource("domoticz://scenes",          "Scenes",         "Scenes",              "All scenes and groups",                                                                                        "text/plain");
+		addResource("domoticz://user-variables",  "User Variables", "User Variables",      "All user variables",                                                                                           "text/plain");
+		addResource("domoticz://events",          "Event Scripts",  "Event Scripts",       "All automation event scripts",                                                                                 "text/plain");
+		addResource("domoticz://security",        "Security",       "Security",            "Security panel status",                                                                                        "text/plain");
+		addResource("domoticz://settings",        "Settings",       "Settings",            "System configuration (key subset)",                                                                            "text/plain");
+		addResource("domoticz://log",             "System Log",     "System Log",          "Recent system log entries",                                                                                    "text/plain");
+		addResource("domoticz://sensor-types",    "Sensor Types",   "Virtual Sensor Types","All sensor types available for create_sensor / create_virtual_sensor, with their names and numeric mapped values","text/plain");
+		addResource("domoticz://hardware",        "Hardware",       "Hardware",            "All configured hardware instances with type, enabled status, and ID",                                          "text/plain");
+		addResource("domoticz://notifications",   "Notifications",  "Notifications",       "All configured device notifications with trigger conditions and target systems",                               "text/plain");
+		addResource("domoticz://timers",          "Timers",         "Timers",              "All device and scene timers with schedule and command details",                                                "text/plain");
+
+		auto result = m_sql.safe_query("SELECT ID, Name FROM Floorplans");
+		for (const auto &row : result)
+		{
+			std::string idx = row[0];
+			std::string sName = row[1];
+			Json::Value resource;
+			resource["uri"] = "floorplan:///image/" + idx;
+			resource["name"] = sName;
+			resource["title"] = sName + " (Floorplan)";
+			resource["description"] = "A Floorplan called " + sName + " with IDX " + idx;
+			resource["mimeType"] = "image/*";
+			Json::Value meta;
+			meta["idx"] = atoi(idx.c_str());
+			resource["_meta"] = meta;
+			allResources.append(resource);
+		}
+
+		int total = (int)allResources.size();
+		Json::Value page(Json::arrayValue);
+		for (int i = offset; i < std::min(offset + MCP_LIST_PAGE_SIZE, total); i++)
+			page.append(allResources[i]);
+		jsonRPCRep["result"]["resources"] = page;
+
+		if (offset + MCP_LIST_PAGE_SIZE < total)
+		{
+			Json::Value nextCursorObj;
+			nextCursorObj["offset"] = offset + MCP_LIST_PAGE_SIZE;
+			jsonRPCRep["result"]["nextCursor"] = base64_encode(JSonToRawString(nextCursorObj));
+		}
+
+		_log.Debug(DEBUG_WEBSERVER, "MCP: ResourcesList: Number of resources offered: %d", total);
 	}
 
 	void McpResourcesTemplatesList(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
@@ -1897,7 +2275,22 @@ namespace mcp		// Model Context Protocol
 			  "Generate a daily digest covering overnight anomalies, battery warnings, offline devices, and energy highlights", {} },
 		};
 
-		jsonRPCRep["result"]["prompts"] = Json::Value(Json::arrayValue);
+		int offset = 0;
+		if (jsonRequest.isMember("params") && jsonRequest["params"].isMember("cursor"))
+		{
+			std::string cursorStr = jsonRequest["params"]["cursor"].asString();
+			if (!cursorStr.empty())
+			{
+				std::string decoded = base64_decode(cursorStr);
+				Json::Value cursorObj;
+				if (ParseJSon(decoded, cursorObj) && cursorObj.isMember("offset") && cursorObj["offset"].isInt())
+					offset = cursorObj["offset"].asInt();
+			}
+		}
+		if (offset < 0)
+			offset = 0;
+
+		Json::Value allPrompts(Json::arrayValue);
 		for (const auto &def : kPrompts)
 		{
 			Json::Value prompt;
@@ -1913,7 +2306,20 @@ namespace mcp		// Model Context Protocol
 				arg["required"]    = a.required;
 				prompt["arguments"].append(arg);
 			}
-			jsonRPCRep["result"]["prompts"].append(prompt);
+			allPrompts.append(prompt);
+		}
+
+		int total = (int)allPrompts.size();
+		Json::Value page(Json::arrayValue);
+		for (int i = offset; i < std::min(offset + MCP_LIST_PAGE_SIZE, total); i++)
+			page.append(allPrompts[i]);
+		jsonRPCRep["result"]["prompts"] = page;
+
+		if (offset + MCP_LIST_PAGE_SIZE < total)
+		{
+			Json::Value nextCursorObj;
+			nextCursorObj["offset"] = offset + MCP_LIST_PAGE_SIZE;
+			jsonRPCRep["result"]["nextCursor"] = base64_encode(JSonToRawString(nextCursorObj));
 		}
 	}
 
@@ -2171,6 +2577,8 @@ namespace mcp		// Model Context Protocol
 
 		// Query rows: vector of strings (display value)
 		std::vector<std::string> candidates;
+		// When true the candidates are already filtered (e.g. via SQL LIKE), skip the prefix pass.
+		bool bAlreadyFiltered = false;
 
 		if (sRefType == "ref/prompt")
 		{
@@ -2238,6 +2646,71 @@ namespace mcp		// Model Context Protocol
 				return;
 			}
 		}
+		else if (sRefType == "ref/tool")
+		{
+			int bToolReportedTotal = 0;
+			auto loadLikeRows = [&](const std::vector<std::vector<std::string>> &rows) -> bool {
+				bool overflow = (rows.size() > 20);
+				int limit = overflow ? 20 : static_cast<int>(rows.size());
+				for (int i = 0; i < limit; ++i)
+					candidates.push_back(rows[i][0]);
+				bAlreadyFiltered = true;
+				bToolReportedTotal = overflow ? limit + 1 : limit;
+				return overflow;
+			};
+
+			bool bToolHasMore = false;
+			if (sArgName == "name")
+			{
+				auto rows = m_sql.safe_query("SELECT Name FROM DeviceStatus WHERE Name LIKE '%%%q%%' ORDER BY Name LIMIT 21", sPartial.c_str());
+				bToolHasMore = loadLikeRows(rows);
+			}
+			else if (sArgName == "scene")
+			{
+				auto rows = m_sql.safe_query("SELECT Name FROM Scenes WHERE Name LIKE '%%%q%%' ORDER BY Name LIMIT 21", sPartial.c_str());
+				bToolHasMore = loadLikeRows(rows);
+			}
+			else if (sArgName == "room")
+			{
+				auto rows = m_sql.safe_query("SELECT Name FROM Plans WHERE Name LIKE '%%%q%%' ORDER BY Name LIMIT 21", sPartial.c_str());
+				bToolHasMore = loadLikeRows(rows);
+			}
+			else if (sArgName == "level")
+			{
+				static const std::vector<std::string> logLevels = { "debug", "info", "notice", "warning", "error", "critical" };
+				for (const auto &lvl : logLevels)
+					candidates.push_back(lvl);
+			}
+			else if (sArgName == "uri")
+			{
+				static const std::vector<std::string> uris = {
+					"domoticz://devices",
+					"domoticz://scenes",
+					"domoticz://devices/",
+					"domoticz://scenes/"
+				};
+				for (const auto &uri : uris)
+					candidates.push_back(uri);
+			}
+			else
+			{
+				_log.Debug(DEBUG_WEBSERVER, "MCP: completion/complete: No completion available for tool arg '%s'.", sArgName.c_str());
+				emptyResult();
+				return;
+			}
+
+			if (bAlreadyFiltered)
+			{
+				jsonRPCRep["result"]["completion"]["values"] = Json::Value(Json::arrayValue);
+				for (const auto &c : candidates)
+					jsonRPCRep["result"]["completion"]["values"].append(c);
+				jsonRPCRep["result"]["completion"]["total"] = bToolReportedTotal;
+				jsonRPCRep["result"]["completion"]["hasMore"] = bToolHasMore;
+				_log.Debug(DEBUG_WEBSERVER, "MCP: completion/complete: Returning %d matches (hasMore=%s).",
+				           static_cast<int>(candidates.size()), bToolHasMore ? "true" : "false");
+				return;
+			}
+		}
 		else
 		{
 			_log.Debug(DEBUG_WEBSERVER, "MCP: completion/complete: Unknown ref type '%s'.", sRefType.c_str());
@@ -2270,6 +2743,16 @@ namespace mcp		// Model Context Protocol
 		           count, total, hasMore ? "true" : "false");
 	}
 
+	static int jsonAsIdx(const Json::Value &v)
+	{
+		if (v.isString())
+		{
+			try { return std::stoi(v.asString()); }
+			catch (const std::exception&) { return -1; }
+		}
+		return v.asInt();
+	}
+
 	bool getSwitchState(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
 	{
 		const Json::Value &args = jsonRequest["params"]["arguments"];
@@ -2285,8 +2768,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -2315,8 +2798,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -2327,8 +2810,9 @@ namespace mcp		// Model Context Protocol
 		if (bFound)
 		{
 			sSwitchState = "The state of switch \"" + sSwitchName + "\" before toggle was: " + device["Data"].asString() + ". ";
-			// const std::string& idx, const std::string& switchcmd, const std::string& level, const std::string& color, const std::string& ooc, const int ExtraDelay, const std::string& User)
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			sSwitchState += (m_mainworker.SwitchLight(device["idx"].asString(), "Toggle", "", "", "", 0, "") == MainWorker::eSwitchLightReturnCode::SL_ERROR ? "Error toggling the switch." : "Switch toggled successfully.");
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sSwitchState, !bFound);
 		return true;
@@ -2349,8 +2833,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSensorName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSensorName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -2507,8 +2991,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sThermostatName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sThermostatName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -2520,7 +3004,9 @@ namespace mcp		// Model Context Protocol
 		{
 			sThermostatState = "The value of thermostat \"" + sThermostatName + "\" before setting was: " + device["Data"].asString() + ". ";
 			bFound = true;
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			sThermostatState += (m_mainworker.SetSetPoint(device["idx"].asString(), fNewSetpoint, "MCP") == false ? "Error setting the setpoint." : "Setpoint set successfully.");
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sThermostatState, !bFound);
 		return true;
@@ -2668,6 +3154,8 @@ namespace mcp		// Model Context Protocol
 		return true;
 	}
 
+
+
 	bool getDeviceByName(const std::string &sDeviceName, Json::Value &device)
 	{
 		Json::Value jsonDevices;
@@ -2687,7 +3175,9 @@ namespace mcp		// Model Context Protocol
 	bool getDeviceByIdx(int nIdx, Json::Value &device)
 	{
 		Json::Value jsonDevices;
-		m_webservers.GetJSonDevices(jsonDevices, "true", "", "", "", "", "", false, false, false, 0, "", "");
+		// bDisplayDisabled=true: include disabled devices so sensor history/short-log tools
+		// can still read data for devices that are temporarily disabled.
+		m_webservers.GetJSonDevices(jsonDevices, "true", "", "", "", "", "", false, true, false, 0, "", "");
 		for (const auto &dev : jsonDevices["result"])
 		{
 			if (dev.isObject() && dev.isMember("idx") && dev["idx"].asString() == std::to_string(nIdx))
@@ -2732,9 +3222,12 @@ namespace mcp		// Model Context Protocol
 
 	bool getAllDevices(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
 	{
+		// args access is safe: McpToolsCall guarantees params/arguments exists before dispatching
+		const Json::Value &args = jsonRequest["params"]["arguments"];
+
 		std::string sFilter;
-		if (jsonRequest["params"].isMember("arguments") && jsonRequest["params"]["arguments"].isMember("filter"))
-			sFilter = jsonRequest["params"]["arguments"]["filter"].asString();
+		if (args.isMember("filter"))
+			sFilter = args["filter"].asString();
 
 		// Validate filter against whitelist
 		if (!sFilter.empty() && sFilter != "light" && sFilter != "temp" && sFilter != "weather" && sFilter != "utility")
@@ -2744,9 +3237,26 @@ namespace mcp		// Model Context Protocol
 			return true;
 		}
 
+		// -1 means "not provided"; valid Hardware IDs start at 1 (AUTOINCREMENT primary key)
+		int nHwIdx = -1;
+		if (args.isMember("hw_idx"))
+		{
+			nHwIdx = args["hw_idx"].asInt();
+			auto hwResult = m_sql.safe_query("SELECT ID FROM Hardware WHERE ID=%d", nHwIdx);
+			if (hwResult.empty() || hwResult[0].empty())
+			{
+				mcp::setToolResult(jsonRPCRep, "No hardware found with hw_idx=" + std::to_string(nHwIdx), true);
+				return true;
+			}
+		}
+
+		bool bIncludeUnused = args.isMember("include_unused") && args["include_unused"].asBool();
+		std::string sUsed = bIncludeUnused ? "" : "true";
+
 		Json::Value jsonDevices;
-		std::string sUsed = "true";
-		m_webservers.GetJSonDevices(jsonDevices, sUsed, sFilter, "Name", "", "", "", false, false, false, 0, "", "");
+		std::string sHwIdxFilter = (nHwIdx >= 0 ? std::to_string(nHwIdx) : "");
+		// empty hardwareid = return devices from all hardware adapters
+		m_webservers.GetJSonDevices(jsonDevices, sUsed, sFilter, "Name", "", "", "", false, false, false, 0, "", sHwIdxFilter);
 
 		std::string sResult;
 		int iCount = 0;
@@ -2758,11 +3268,12 @@ namespace mcp		// Model Context Protocol
 					continue;
 				iCount++;
 				sResult += "- \"" + device["Name"].asString() + "\"";
-				if (device.isMember("Type"))
+				bool bHasType = device.isMember("Type");
+				if (bHasType)
 					sResult += " [" + device["Type"].asString();
 				if (device.isMember("SubType"))
 					sResult += "/" + device["SubType"].asString();
-				if (device.isMember("Type"))
+				if (bHasType)
 					sResult += "]";
 				if (device.isMember("Data"))
 					sResult += " = " + device["Data"].asString();
@@ -2771,13 +3282,13 @@ namespace mcp		// Model Context Protocol
 				if (device.isMember("BatteryLevel") && device["BatteryLevel"].isInt())
 				{
 					int iBatt = device["BatteryLevel"].asInt();
-					if (iBatt != 255)
+					if (iBatt != 255) // 255 = not available
 						sResult += " battery=" + std::to_string(iBatt) + "%";
 				}
 				if (device.isMember("SignalLevel") && device["SignalLevel"].isInt())
 				{
 					int iSignalLevel = device["SignalLevel"].asInt();
-					if (iSignalLevel != 12)
+					if (iSignalLevel != 12) // 12 = not available
 						sResult += " rssi=" + std::to_string(iSignalLevel);
 				}
 				sResult += "\n";
@@ -2785,7 +3296,13 @@ namespace mcp		// Model Context Protocol
 		}
 
 		if (iCount == 0)
-			sResult = "No devices found" + (sFilter.empty() ? "" : " with filter \"" + sFilter + "\"");
+		{
+			sResult = "No devices found";
+			if (!sFilter.empty())
+				sResult += " with filter \"" + sFilter + "\"";
+			if (nHwIdx >= 0)
+				sResult += " for hw_idx=" + std::to_string(nHwIdx);
+		}
 		else
 			sResult = std::to_string(iCount) + " device(s):\n" + sResult;
 
@@ -2852,7 +3369,7 @@ namespace mcp		// Model Context Protocol
 		}
 		else
 		{
-			int nIdx = args["idx"].asInt();
+			int nIdx = jsonAsIdx(args["idx"]);
 			auto result = m_sql.safe_query(
 				"SELECT DS.Name, DS.HardwareID, H.Name, DS.DeviceID, DS.Type, DS.SubType, DS.nValue, DS.sValue, DS.LastUpdate, DS.Used, DS.BatteryLevel, DS.SignalLevel "
 				"FROM DeviceStatus DS LEFT JOIN Hardware H ON DS.HardwareID=H.ID WHERE DS.ID=%d", nIdx);
@@ -2903,8 +3420,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sOldName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sOldName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -2941,8 +3458,47 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
+		}
+		else
+		{
+			sName = args["name"].asString();
+			bFound = getDeviceByName(sName, device);
+		}
+		std::string sResult;
+		if (bFound)
+		{
+			std::string sIdx = device["idx"].asString();
+			m_sql.DeleteDevices(sIdx);
+			sResult = "Device \"" + sName + "\" (idx=" + sIdx + ") has been permanently deleted.";
+		}
+		else
+		{
+			sResult = "No device found with name \"" + sName + "\"";
+		}
+
+		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
+		return true;
+	}
+
+	bool hideDevice(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
+	{
+		const Json::Value &args = jsonRequest["params"]["arguments"];
+		bool bHasIdx = args.isMember("idx");
+		bool bHasName = args.isMember("name") && !args["name"].asString().empty();
+		if (!bHasIdx && !bHasName)
+		{
+			_log.Debug(DEBUG_WEBSERVER, "MCP: hideDevice: Missing required parameter 'name' or 'idx'");
+			return false;
+		}
+		Json::Value device;
+		std::string sName;
+		bool bFound;
+		if (bHasIdx)
+		{
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -3092,8 +3648,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -3120,6 +3676,86 @@ namespace mcp		// Model Context Protocol
 		return true;
 	}
 
+	// Reads an on/off/dim/text activation log from either LightingLog (devices) or
+	// SceneLog (scenes/groups) and renders it as human-readable text. Both tables share
+	// (nValue, User, Date); LightingLog adds sValue. Pass sValueExpr="sValue" for
+	// LightingLog or "''" for SceneLog (which has no sValue column).
+	// table, idColumn and sValueExpr are internal constants, never user input.
+	std::string buildEventHistory(const std::string &table, const std::string &idColumn,
+		const std::string &sValueExpr, uint64_t id, const std::string &sName,
+		const std::string &sLabel, const Json::Value &args)
+	{
+		auto formatState = [](const std::string &sNValue, const std::string &sValue) -> std::string {
+			int nValue = atoi(sNValue.c_str());
+			std::string sState;
+			if (nValue == 0)       sState = "Off";
+			else if (nValue == 1)  sState = "On";
+			else if (nValue == 2)  sState = "Toggle";
+			else if (nValue == 9)  sState = "Dim to level";
+			else                   sState = std::to_string(nValue);
+			if (!sValue.empty())   sState += ": " + sValue;
+			return sState;
+		};
+
+		std::string sResult;
+		if (args.isMember("count") && !args["count"].isNull())
+		{
+			int iCount = std::max(1, std::min(500, args["count"].asInt()));
+			std::string sQ = "SELECT Date, nValue, " + sValueExpr + ", User FROM " + table +
+				" WHERE " + idColumn + "=%" PRIu64 " ORDER BY Date DESC LIMIT %d";
+			auto result = m_sql.safe_query(sQ.c_str(), id, iCount);
+			if (result.empty())
+				return "No log entries found for \"" + sName + "\"";
+			sResult = "Last " + std::to_string((int)result.size()) +
+				" log entries for " + sLabel + " \"" + sName + "\":\n";
+			for (const auto &row : result)
+			{
+				std::string sLine = row[0] + "  " + formatState(row[1], row[2]);
+				if (!row[3].empty()) sLine += "  (user: " + row[3] + ")";
+				sResult += sLine + "\n";
+			}
+			return sResult;
+		}
+
+		std::string szDateStart, szDateEnd;
+		if (args.isMember("start_date") && args.isMember("end_date") &&
+		    !args["start_date"].asString().empty() && !args["end_date"].asString().empty())
+		{
+			szDateStart = args["start_date"].asString();
+			szDateEnd   = args["end_date"].asString();
+		}
+		else
+		{
+			int iDays = 7;
+			if (args.isMember("days"))
+				iDays = std::max(1, std::min(366, args["days"].asInt()));
+			time_t now = mytime(nullptr);
+			struct tm tmNow, tmStart;
+			localtime_r(&now, &tmNow);
+			time_t tStart = now - (time_t)(iDays - 1) * 86400LL;
+			localtime_r(&tStart, &tmStart);
+			char buf[16];
+			strftime(buf, sizeof(buf), "%Y-%m-%d", &tmNow);
+			szDateEnd = buf;
+			strftime(buf, sizeof(buf), "%Y-%m-%d", &tmStart);
+			szDateStart = buf;
+		}
+		std::string sQ = "SELECT Date, nValue, " + sValueExpr + ", User FROM " + table +
+			" WHERE " + idColumn + "=%" PRIu64 " AND Date>='%q' AND Date<='%q 23:59:59' ORDER BY Date DESC";
+		auto result = m_sql.safe_query(sQ.c_str(), id, szDateStart.c_str(), szDateEnd.c_str());
+		if (result.empty())
+			return "No log entries found for \"" + sName + "\" in the specified period.";
+		sResult = std::to_string((int)result.size()) +
+			" log entries for " + sLabel + " \"" + sName + "\" (" + szDateStart + " to " + szDateEnd + "):\n";
+		for (const auto &row : result)
+		{
+			std::string sLine = row[0] + "  " + formatState(row[1], row[2]);
+			if (!row[3].empty()) sLine += "  (user: " + row[3] + ")";
+			sResult += sLine + "\n";
+		}
+		return sResult;
+	}
+
 	bool getSensorHistory(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
 	{
 		const Json::Value &args = jsonRequest["params"]["arguments"];
@@ -3136,8 +3772,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -3151,19 +3787,26 @@ namespace mcp		// Model Context Protocol
 		}
 		const uint64_t nIdx = (uint64_t)atoll(device["idx"].asString().c_str());
 
-		// Scenes/groups are not in DeviceStatus — detect them first via the device JSON Type field.
-		bool bIsSwitch = false;
+		// Scenes/groups share the device list but live in a separate idx namespace and log to
+		// SceneLog (not DeviceStatus/LightingLog). Redirect to the dedicated tool rather than
+		// querying DeviceStatus with the scene's idx, which would collide with a device of the same id.
 		if (device.isMember("Type"))
 		{
 			const std::string sDevType = device["Type"].asString();
 			if (sDevType == "Scene" || sDevType == "Group")
-				bIsSwitch = true;
+			{
+				mcp::setToolResult(jsonRPCRep,
+					"\"" + sName + "\" is a " + (sDevType == "Group" ? "group" : "scene") +
+					". Use get_scene_history to retrieve its activation log.", true);
+				return true;
+			}
 		}
 
-		// For non-scene devices fetch dType/dSubType, then use IsLightOrSwitch().
+		bool bIsEventDevice = false;
+
+		// Fetch dType/dSubType, then route switch/text/alert event devices to the LightingLog event log.
 		unsigned char dType    = 0;
 		unsigned char dSubType = 0;
-		if (!bIsSwitch)
 		{
 			auto devResult = m_sql.safe_query(
 				"SELECT Type, SubType FROM DeviceStatus WHERE ID=%" PRIu64, nIdx);
@@ -3174,102 +3817,13 @@ namespace mcp		// Model Context Protocol
 			}
 			dType    = (unsigned char)atoi(devResult[0][0].c_str());
 			dSubType = (unsigned char)atoi(devResult[0][1].c_str());
-			bIsSwitch = IsLightOrSwitch(dType, dSubType);
+			bIsEventDevice = IsEventSwitchLike(dType, dSubType);
 		}
 
-		if (bIsSwitch)
+		if (bIsEventDevice)
 		{
-			// --- LightingLog branch: switches and scenes ---
-			std::string sResult;
-
-			if (args.isMember("count") && !args["count"].isNull())
-			{
-				// Last N entries regardless of date
-				int iCount = std::max(1, std::min(500, args["count"].asInt()));
-				auto result = m_sql.safe_query(
-					"SELECT Date, nValue, sValue, User FROM LightingLog "
-					"WHERE DeviceRowID=%" PRIu64 " ORDER BY Date DESC LIMIT %d",
-					nIdx, iCount);
-				if (result.empty())
-				{
-					sResult = "No log entries found for \"" + sName + "\"";
-				}
-				else
-				{
-					sResult = "Last " + std::to_string((int)result.size()) +
-					          " log entries for switch \"" + sName + "\":\n";
-					for (const auto &row : result)
-					{
-						int nValue = atoi(row[1].c_str());
-						std::string sState;
-						if (nValue == 0)       sState = "Off";
-						else if (nValue == 1)  sState = "On";
-						else if (nValue == 2)  sState = "Toggle";
-						else if (nValue == 9)  sState = "Dim to level";
-						else                   sState = std::to_string(nValue);
-						if (!row[2].empty())   sState += ": " + row[2];
-						std::string sLine = row[0] + "  " + sState;
-						if (!row[3].empty())   sLine += "  (user: " + row[3] + ")";
-						sResult += sLine + "\n";
-					}
-				}
-			}
-			else
-			{
-				// Date range filter
-				std::string szDateStart, szDateEnd;
-				if (args.isMember("start_date") && args.isMember("end_date") &&
-				    !args["start_date"].asString().empty() && !args["end_date"].asString().empty())
-				{
-					szDateStart = args["start_date"].asString();
-					szDateEnd   = args["end_date"].asString();
-				}
-				else
-				{
-					int iDays = 7;
-					if (args.isMember("days"))
-						iDays = std::max(1, std::min(366, args["days"].asInt()));
-					time_t now = mytime(nullptr);
-					struct tm tmNow, tmStart;
-					localtime_r(&now, &tmNow);
-					time_t tStart = now - (time_t)(iDays - 1) * 86400LL;
-					localtime_r(&tStart, &tmStart);
-					char buf[16];
-					strftime(buf, sizeof(buf), "%Y-%m-%d", &tmNow);
-					szDateEnd = buf;
-					strftime(buf, sizeof(buf), "%Y-%m-%d", &tmStart);
-					szDateStart = buf;
-				}
-				auto result = m_sql.safe_query(
-					"SELECT Date, nValue, sValue, User FROM LightingLog "
-					"WHERE DeviceRowID=%" PRIu64 " AND Date>='%q' AND Date<='%q 23:59:59' "
-					"ORDER BY Date DESC",
-					nIdx, szDateStart.c_str(), szDateEnd.c_str());
-				if (result.empty())
-				{
-					sResult = "No log entries found for \"" + sName + "\" in the specified period.";
-				}
-				else
-				{
-					sResult = std::to_string((int)result.size()) +
-					          " log entries for switch \"" + sName + "\" (" +
-					          szDateStart + " to " + szDateEnd + "):\n";
-					for (const auto &row : result)
-					{
-						int nValue = atoi(row[1].c_str());
-						std::string sState;
-						if (nValue == 0)       sState = "Off";
-						else if (nValue == 1)  sState = "On";
-						else if (nValue == 2)  sState = "Toggle";
-						else if (nValue == 9)  sState = "Dim to level";
-						else                   sState = std::to_string(nValue);
-						if (!row[2].empty())   sState += ": " + row[2];
-						std::string sLine = row[0] + "  " + sState;
-						if (!row[3].empty())   sLine += "  (user: " + row[3] + ")";
-						sResult += sLine + "\n";
-					}
-				}
-			}
+			std::string sResult = buildEventHistory("LightingLog", "DeviceRowID", "sValue",
+				nIdx, sName, "switch", args);
 			mcp::setToolResult(jsonRPCRep, sResult, false);
 			return true;
 		}
@@ -3277,7 +3831,9 @@ namespace mcp		// Model Context Protocol
 		// Map device type to sensor string (what HandleGraphCustomRange expects)
 		std::string sSensor;
 		if (dType == pTypeTEMP || dType == pTypeTEMP_HUM || dType == pTypeTEMP_HUM_BARO ||
-		    dType == pTypeTEMP_BARO || dType == pTypeHUM)
+		    dType == pTypeTEMP_BARO || dType == pTypeHUM ||
+		    dType == pTypeSetpoint || dType == pTypeRego6XXTemp ||
+		    dType == pTypeRadiator1 || dType == pTypeThermostat6)
 			sSensor = "temp";
 		else if (dType == pTypeRAIN)
 			sSensor = "rain";
@@ -3299,6 +3855,12 @@ namespace mcp		// Model Context Protocol
 		{
 			szDateStart = args["start_date"].asString();
 			szDateEnd   = args["end_date"].asString();
+			if (!m_sql.CheckDateSQL(szDateStart) || !m_sql.CheckDateSQL(szDateEnd))
+			{
+				mcp::setToolResult(jsonRPCRep,
+					"Invalid date. Use the format YYYY-MM-DD for start_date and end_date.", true);
+				return true;
+			}
 		}
 		else
 		{
@@ -3368,17 +3930,42 @@ namespace mcp		// Model Context Protocol
 
 		if (!root.isMember("result") || root["result"].empty())
 		{
-			std::string sMsg = "There is no graph history available for the \"" + sName + "\" sensor ";
-			sMsg += "between " + szDateStart + " and " + szDateEnd + ".\n";
-			sMsg += "This may mean graph logging is disabled for this device or no data has been recorded.\n";
+			std::string sMsg = "No daily history for \"" + sName + "\" between " + szDateStart + " and " + szDateEnd + ".\n";
+			sMsg += "The data may be outside this date range, or daily history may not be recorded for this device yet.\n";
 			sMsg += "Tip: try a wider date range or increase 'days'.";
 			mcp::setToolResult(jsonRPCRep, sMsg, true);
 			return true;
 		}
 
+		// For pTypeSetpoint: check if the unit is a custom (non-temperature) unit.
+		std::string sSetpointUnit;
+		bool bSetpointIsTemp = true;
+		if (dType == pTypeSetpoint)
+		{
+			auto opts = m_sql.GetDeviceOptions(std::to_string(nIdx));
+			auto it = opts.find("ValueUnit");
+			if (it != opts.end())
+				sSetpointUnit = it->second;
+			bSetpointIsTemp = sSetpointUnit.empty()
+			               || sSetpointUnit == "\xc2\xb0""C" || sSetpointUnit == "\xc2\xb0""F"
+			               || sSetpointUnit == "C" || sSetpointUnit == "F"
+			               || sSetpointUnit == "°C" || sSetpointUnit == "°F";
+			if (bSetpointIsTemp && sSetpointUnit.empty())
+				sSetpointUnit = std::string("\xc2\xb0") + sTempUnit;
+		}
+
+		// Single per-response unit for the counter families (empty for temp/rain/etc).
+		const std::string sUnit = root.isMember("ValueUnits") ? root["ValueUnits"].asString() : "";
+		const std::string sUSuffix = sUnit.empty() ? "" : (" " + sUnit);
+
 		// Format the JSON result as human-readable text
 		if (sSensor == "temp")
-			sResult = "Daily temperature history for \"" + sName + "\" (\xc2\xb0" + sTempUnit + " min/avg/max):\n";
+		{
+			if (dType == pTypeSetpoint && !bSetpointIsTemp)
+				sResult = "Daily setpoint history for \"" + sName + "\" (" + sSetpointUnit + " min/avg/max):\n";
+			else
+				sResult = "Daily temperature history for \"" + sName + "\" (\xc2\xb0" + sTempUnit + " min/avg/max):\n";
+		}
 		else if (sSensor == "rain")
 			sResult = "Daily rain history for \"" + sName + "\" (mm):\n";
 		else if (sSensor == "wind")
@@ -3390,7 +3977,12 @@ namespace mcp		// Model Context Protocol
 		else if (sSensor == "fan")
 			sResult = "Daily fan speed history for \"" + sName + "\" (rpm min/max):\n";
 		else
-			sResult = "Daily history for \"" + sName + "\":\n";
+		{
+			sResult = "Daily history for \"" + sName + "\"";
+			if (!sUnit.empty())
+				sResult += " (" + sUnit + ")";
+			sResult += ":\n";
+		}
 
 		sResult += "Date        | Data\n";
 		sResult += "------------|--------------------------------------\n";
@@ -3404,10 +3996,18 @@ namespace mcp		// Model Context Protocol
 			{
 				std::string sLine = sDate + " |";
 				if (row.isMember("tm") && row.isMember("ta") && row.isMember("te"))
-					sLine += " temp: min=" + cvtTemp(row["tm"].asString()) +
-					         " avg=" + cvtTemp(row["ta"].asString()) +
-					         " max=" + cvtTemp(row["te"].asString()) +
-					         "\xc2\xb0" + sTempUnit;
+				{
+					if (dType == pTypeSetpoint && !bSetpointIsTemp)
+						sLine += " setpoint: min=" + row["tm"].asString() +
+						         " avg=" + row["ta"].asString() +
+						         " max=" + row["te"].asString() +
+						         " " + sSetpointUnit;
+					else
+						sLine += " temp: min=" + cvtTemp(row["tm"].asString()) +
+						         " avg=" + cvtTemp(row["ta"].asString()) +
+						         " max=" + cvtTemp(row["te"].asString()) +
+						         "\xc2\xb0" + sTempUnit;
+				}
 				if (row.isMember("hu"))
 					sLine += "  hum=" + row["hu"].asString() + "%";
 				if (row.isMember("ba"))
@@ -3440,14 +4040,354 @@ namespace mcp		// Model Context Protocol
 				if (row.isMember("v_max")) sLine += " max=" + row["v_max"].asString();
 				sResult += sLine + "\n";
 			}
-			else // counter (includes P1, energy, gas, water, generic counters)
+			else // counter families, dispatched by the key shape the core emits.
+			     // Contract with HandleGraphCustomRange: co2_*/lux_*/u_* => min/avg/max
+			     // aggregate; v1..v6 (v3 present) => multi-channel current L1/L2/L3;
+			     // v1(/v2) alone => P1 usage/delivery; v_min/v_max(/v_avg) => single-series
+			     // aggregate; v => plain value. The core emits each family's key set
+			     // atomically (all of min/avg/max, or all of v1..v6), so sibling keys are
+			     // read without a per-key guard.
 			{
 				std::string sLine = sDate + " |";
-				if (row.isMember("v1")) sLine += " usage=" + row["v1"].asString();
-				if (row.isMember("v2")) sLine += " delivery=" + row["v2"].asString();
-				if (!row.isMember("v1") && row.isMember("v")) sLine += " value=" + row["v"].asString();
+
+				if (row.isMember("co2_min"))
+					sLine += " min " + row["co2_min"].asString() + " avg " + row["co2_avg"].asString() +
+						 " max " + row["co2_max"].asString() + sUSuffix;
+				else if (row.isMember("lux_min"))
+					sLine += " min " + row["lux_min"].asString() + " avg " + row["lux_avg"].asString() +
+						 " max " + row["lux_max"].asString() + sUSuffix;
+				else if (row.isMember("u_min"))
+					sLine += " min " + row["u_min"].asString() + " avg " + row["u_avg"].asString() +
+						 " max " + row["u_max"].asString() + sUSuffix;
+				else if (row.isMember("v3")) // multi-channel Current (CM113 / CM180i): v1/v2=L1, v3/v4=L2, v5/v6=L3
+				{
+					if (root.isMember("haveL1"))
+						sLine += " L1: " + row["v1"].asString() + "-" + row["v2"].asString() + sUSuffix;
+					if (root.isMember("haveL2"))
+						sLine += " L2: " + row["v3"].asString() + "-" + row["v4"].asString() + sUSuffix;
+					if (root.isMember("haveL3"))
+						sLine += " L3: " + row["v5"].asString() + "-" + row["v6"].asString() + sUSuffix;
+				}
+				else if (row.isMember("v1")) // P1 power: usage / delivery
+				{
+					sLine += " usage " + row["v1"].asString();
+					if (row.isMember("v2"))
+						sLine += " delivery " + row["v2"].asString();
+				}
+				else if (row.isMember("v_min"))
+				{
+					sLine += " min " + row["v_min"].asString();
+					if (row.isMember("v_avg"))
+						sLine += " avg " + row["v_avg"].asString();
+					sLine += " max " + row["v_max"].asString() + sUSuffix;
+				}
+				else if (row.isMember("v"))
+					sLine += " " + row["v"].asString() + sUSuffix;
+
 				sResult += sLine + "\n";
 			}
+		}
+
+		mcp::setToolResult(jsonRPCRep, sResult, false);
+		return true;
+	}
+
+	bool getSensorShortLog(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
+	{
+		const Json::Value &args = jsonRequest["params"]["arguments"];
+		bool bHasIdx  = args.isMember("idx");
+		bool bHasName = args.isMember("name") && !args["name"].asString().empty();
+		if (!bHasIdx && !bHasName)
+		{
+			_log.Debug(DEBUG_WEBSERVER, "MCP: getSensorShortLog: Missing required parameter 'name' or 'idx'");
+			return false;
+		}
+
+		Json::Value device;
+		std::string sName;
+		bool bFound;
+		if (bHasIdx)
+		{
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sName  = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
+		}
+		else
+		{
+			sName  = args["name"].asString();
+			bFound = getDeviceByName(sName, device);
+		}
+		if (!bFound)
+		{
+			mcp::setToolResult(jsonRPCRep, "No device found with name \"" + sName + "\"", true);
+			return true;
+		}
+		const uint64_t nIdx = (uint64_t)atoll(device["idx"].asString().c_str());
+
+		auto devResult = m_sql.safe_query(
+			"SELECT Type, SubType FROM DeviceStatus WHERE ID=%" PRIu64, nIdx);
+		if (devResult.empty())
+		{
+			mcp::setToolResult(jsonRPCRep, "Device \"" + sName + "\" not found in database.", true);
+			return true;
+		}
+		const unsigned char dType    = (unsigned char)atoi(devResult[0][0].c_str());
+		const unsigned char dSubType = (unsigned char)atoi(devResult[0][1].c_str());
+
+		if (IsLightOrSwitch(dType, dSubType))
+		{
+			mcp::setToolResult(jsonRPCRep,
+				"\"" + sName + "\" is a switch/light device. Use get_sensor_history to retrieve its log.", true);
+			return true;
+		}
+
+		// Map device type to sensor string
+		std::string sSensor;
+		if (dType == pTypeTEMP || dType == pTypeTEMP_HUM || dType == pTypeTEMP_HUM_BARO ||
+		    dType == pTypeTEMP_BARO || dType == pTypeHUM ||
+		    dType == pTypeSetpoint || dType == pTypeRego6XXTemp ||
+		    dType == pTypeRadiator1 || dType == pTypeThermostat6)
+			sSensor = "temp";
+		else if (dType == pTypeRAIN)
+			sSensor = "rain";
+		else if (dType == pTypeWIND)
+			sSensor = "wind";
+		else if (dType == pTypeUV)
+			sSensor = "uv";
+		else if (dType == pTypeGeneral && dSubType == sTypePercentage)
+			sSensor = "Percentage";
+		else if (dType == pTypeGeneral && dSubType == sTypeFan)
+			sSensor = "fan";
+		else
+			sSensor = "counter";
+
+		// Map sensor string to short-log table
+		std::string dbasetable;
+		if (sSensor == "temp")
+			dbasetable = "Temperature";
+		else if (sSensor == "rain")
+			dbasetable = "Rain";
+		else if (sSensor == "wind")
+			dbasetable = "Wind";
+		else if (sSensor == "uv")
+			dbasetable = "UV";
+		else if (sSensor == "Percentage")
+			dbasetable = "Percentage";
+		else if (sSensor == "fan")
+			dbasetable = "Fan";
+		else
+		{
+			// counter: P1Power / CURRENT / CURRENTENERGY use MultiMeter, others use Meter
+			if (dType == pTypeP1Power || dType == pTypeCURRENT || dType == pTypeCURRENTENERGY)
+				dbasetable = "MultiMeter";
+			else
+				dbasetable = "Meter";
+		}
+
+		const char tempsign   = m_sql.m_tempsign[0];
+		const char *sTempUnit = (tempsign == 'F') ? "F" : "C";
+		auto cvtTemp = [&](const std::string &s) -> std::string {
+			if (s.empty()) return "";
+			double v = atof(s.c_str());
+			if (tempsign == 'F') v = v * 1.8 + 32.0;
+			char buf[32];
+			snprintf(buf, sizeof(buf), "%.1f", v);
+			return buf;
+		};
+
+		// Build explicit column list per table — never use SELECT * so column order is guaranteed.
+		// DeviceRowID is excluded; Date is always last.
+		// Column layout:
+		//   Temperature : Temperature, Chill, Humidity, Barometer, DewPoint, SetPoint, Date  (7 cols, indices 0-6)
+		//   Rain        : Total, Rate, Date                                                   (3 cols, indices 0-2)
+		//   Wind        : Direction, Speed, Gust, Date                                        (4 cols, indices 0-3)
+		//   UV          : Level, Date                                                         (2 cols, indices 0-1)
+		//   Percentage  : Percentage, Date                                                    (2 cols, indices 0-1)
+		//   Fan         : Speed, Date                                                         (2 cols, indices 0-1)
+		//   Meter       : Value, Usage, Price, Date                                           (4 cols, indices 0-3)
+		//   MultiMeter  : Value1,Value2,Value3,Value4,Value5,Value6, Price, Date              (8 cols, indices 0-7)
+		std::string sColumns;
+		if      (dbasetable == "Temperature") sColumns = "Temperature, Chill, Humidity, Barometer, DewPoint, SetPoint, Date";
+		else if (dbasetable == "Rain")        sColumns = "Total, Rate, Date";
+		else if (dbasetable == "Wind")        sColumns = "Direction, Speed, Gust, Date";
+		else if (dbasetable == "UV")          sColumns = "Level, Date";
+		else if (dbasetable == "Percentage")  sColumns = "Percentage, Date";
+		else if (dbasetable == "Fan")         sColumns = "Speed, Date";
+		else if (dbasetable == "Meter")       sColumns = "Value, [Usage], Price, Date";
+		else /* MultiMeter */                 sColumns = "Value1, Value2, Value3, Value4, Value5, Value6, Price, Date";
+
+		std::vector<std::vector<std::string>> result;
+		std::string sWindowDesc;
+
+		// dbasetable and sColumns are derived from internal device-type logic, never user input.
+		if (args.isMember("count") && !args["count"].isNull())
+		{
+			int iCount = std::max(1, std::min(1000, args["count"].asInt()));
+			std::string sQ = "SELECT " + sColumns + " FROM [" + dbasetable + "] WHERE DeviceRowID=%" PRIu64 " ORDER BY Date DESC LIMIT %d";
+			result = m_sql.safe_query(sQ.c_str(), nIdx, iCount);
+			std::reverse(result.begin(), result.end());
+			sWindowDesc = "last " + std::to_string(iCount) + " readings";
+		}
+		else
+		{
+			int iHours = 24;
+			if (args.isMember("hours") && !args["hours"].isNull())
+				iHours = std::max(1, std::min(168, args["hours"].asInt()));
+			std::string sQ = "SELECT " + sColumns + " FROM [" + dbasetable + "] WHERE DeviceRowID=%" PRIu64
+			                 " AND Date >= datetime('now','localtime','-%d hours') ORDER BY Date ASC";
+			result = m_sql.safe_query(sQ.c_str(), nIdx, iHours);
+			sWindowDesc = "last " + std::to_string(iHours) + " hour(s)";
+		}
+
+		_log.Debug(DEBUG_WEBSERVER, "MCP: getSensorShortLog: device='%s' table='%s' rows=%d",
+			sName.c_str(), dbasetable.c_str(), (int)result.size());
+
+		if (result.empty())
+		{
+			mcp::setToolResult(jsonRPCRep,
+				"No short-log data found for \"" + sName + "\" in the " + sWindowDesc + ".\n"
+				"Short-log data is only kept for a configurable number of days (default: 1 day).", false);
+			return true;
+		}
+
+		// For pTypeSetpoint: read ValueUnit from device options to decide whether
+		// the value is a temperature (apply conversion + °unit) or a custom unit (show raw).
+		std::string sSetpointUnit;
+		bool bSetpointIsTemp = true;
+		if (dType == pTypeSetpoint)
+		{
+			auto opts = m_sql.GetDeviceOptions(std::to_string(nIdx));
+			auto it = opts.find("ValueUnit");
+			if (it != opts.end())
+				sSetpointUnit = it->second;
+			// Treat as temperature only if unit is empty or explicitly a temperature unit
+			bSetpointIsTemp = sSetpointUnit.empty()
+			               || sSetpointUnit == "\xc2\xb0""C" || sSetpointUnit == "\xc2\xb0""F"
+			               || sSetpointUnit == "C" || sSetpointUnit == "F"
+			               || sSetpointUnit == "°C" || sSetpointUnit == "°F";
+			if (bSetpointIsTemp && sSetpointUnit.empty())
+				sSetpointUnit = std::string("\xc2\xb0") + sTempUnit;
+		}
+
+		std::string sResult = std::to_string((int)result.size()) + " short-log readings for \"" +
+		                      sName + "\" (" + sWindowDesc + "):\n";
+		sResult += "Each line: timestamp (YYYY-MM-DD HH:MM:SS) followed by key=value pairs.\n";
+		sResult += "Timestamp           | Data\n";
+		sResult += "--------------------|--------------------------------------\n";
+
+		for (const auto &row : result)
+		{
+			// Column layout per sColumns (DeviceRowID is NOT selected):
+			// Temperature: 0=Temp, 1=Chill, 2=Hum, 3=Baro, 4=Dew, 5=SetPoint, 6=Date
+			// Rain:        0=Total, 1=Rate, 2=Date
+			// Wind:        0=Dir, 1=Speed, 2=Gust, 3=Date
+			// UV:          0=Level, 1=Date
+			// Percentage:  0=Percentage, 1=Date
+			// Fan:         0=Speed, 1=Date
+			// Meter:       0=Value, 1=Usage, 2=Price, 3=Date
+			// MultiMeter:  0-5=Value1-6, 6=Price, 7=Date
+			// row.back() is always the Date string.
+			const std::string &sDate = row.back();
+			std::string sLine = sDate + " |";
+
+			if (dbasetable == "Temperature")
+			{
+				// row: 0=Temp, 1=Chill, 2=Hum, 3=Baro, 4=Dew, 5=SetPoint, 6=Date
+				if (row.size() >= 7)
+				{
+					const bool bIsSetpoint = (dType == pTypeSetpoint || dType == pTypeRego6XXTemp ||
+					                          dType == pTypeRadiator1 || dType == pTypeThermostat6);
+					const std::string &sTempVal  = row[0];
+					const std::string &sSetPtVal = row[5];
+					const bool bHasTemp  = !sTempVal.empty()  && sTempVal  != "0" && sTempVal  != "0.00";
+					const bool bHasSetPt = !sSetPtVal.empty() && sSetPtVal != "0" && sSetPtVal != "0.00";
+					if (bIsSetpoint)
+					{
+						if (bHasTemp)
+						{
+							if (bSetpointIsTemp)
+								sLine += " setpoint=" + cvtTemp(sTempVal) + sSetpointUnit;
+							else
+								sLine += " setpoint=" + sTempVal + " " + sSetpointUnit;
+						}
+					}
+					else if (dType == pTypeTEMP || dType == pTypeTEMP_HUM || dType == pTypeTEMP_HUM_BARO || dType == pTypeTEMP_BARO)
+					{
+						if (bHasTemp)
+							sLine += " temp=" + cvtTemp(sTempVal) + "\xc2\xb0" + sTempUnit;
+					}
+					else
+					{
+						if (bHasTemp)  sLine += " temp=" + cvtTemp(sTempVal) + "\xc2\xb0" + sTempUnit;
+						if (bHasSetPt) sLine += "  setpoint=" + cvtTemp(sSetPtVal) + "\xc2\xb0" + sTempUnit;
+					}
+					if (dType == pTypeTEMP_HUM || dType == pTypeTEMP_HUM_BARO || dType == pTypeHUM)
+						sLine += "  hum=" + row[2] + "%";
+					if (dType == pTypeTEMP_HUM_BARO || dType == pTypeTEMP_BARO)
+						sLine += "  baro=" + row[3] + " hPa";
+					if (dType == pTypeTEMP || dType == pTypeTEMP_HUM || dType == pTypeTEMP_HUM_BARO || dType == pTypeTEMP_BARO)
+						if (!row[4].empty() && row[4] != "0")
+							sLine += "  dew=" + cvtTemp(row[4]) + "\xc2\xb0" + sTempUnit;
+				}
+			}
+			else if (dbasetable == "Rain")
+			{
+				// row: 0=Total, 1=Rate, 2=Date
+				if (row.size() >= 3)
+					sLine += " total=" + row[0] + " mm  rate=" + row[1];
+			}
+			else if (dbasetable == "Wind")
+			{
+				// row: 0=Direction, 1=Speed, 2=Gust, 3=Date
+				if (row.size() >= 4)
+				{
+					double spd  = atof(row[1].c_str()) / 10.0;
+					double gust = atof(row[2].c_str()) / 10.0;
+					char buf[64];
+					snprintf(buf, sizeof(buf), " dir=%.0f\xc2\xb0  speed=%.1f m/s  gust=%.1f m/s",
+						atof(row[0].c_str()), spd, gust);
+					sLine += buf;
+				}
+			}
+			else if (dbasetable == "UV")
+			{
+				// row: 0=Level, 1=Date
+				if (row.size() >= 2)
+					sLine += " uvi=" + row[0];
+			}
+			else if (dbasetable == "Percentage")
+			{
+				// row: 0=Percentage, 1=Date
+				if (row.size() >= 2)
+					sLine += " pct=" + row[0] + "%";
+			}
+			else if (dbasetable == "Fan")
+			{
+				// row: 0=Speed, 1=Date
+				if (row.size() >= 2)
+					sLine += " speed=" + row[0] + " rpm";
+			}
+			else if (dbasetable == "Meter")
+			{
+				// row: 0=Value, 1=Usage, 2=Price, 3=Date
+				if (row.size() >= 4)
+					sLine += " value=" + row[0];
+			}
+			else if (dbasetable == "MultiMeter")
+			{
+				// row: 0=Value1..5=Value6, 6=Price, 7=Date
+				if (row.size() >= 8)
+				{
+					const char *labels[] = { "v1", "v2", "v3", "v4", "v5", "v6" };
+					for (int i = 0; i < 6; ++i)
+					{
+						// Zero is a valid meter reading (e.g. no solar generation, no return feed).
+						if (!row[i].empty())
+							sLine += std::string("  ") + labels[i] + "=" + row[i];
+					}
+				}
+			}
+
+			sResult += sLine + "\n";
 		}
 
 		mcp::setToolResult(jsonRPCRep, sResult, false);
@@ -3942,8 +4882,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -3957,6 +4897,7 @@ namespace mcp		// Model Context Protocol
 		}
 		else
 		{
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			auto rc = m_mainworker.SwitchLight(device["idx"].asString(), sState, "", "", "", 0, "MCP");
 			if (rc == MainWorker::eSwitchLightReturnCode::SL_ERROR)
 				sResult = "Error setting switch \"" + sSwitchName + "\" to " + sState + ".";
@@ -3964,6 +4905,7 @@ namespace mcp		// Model Context Protocol
 				sResult = "Switch \"" + sSwitchName + "\" was already " + sState + ". No action taken.";
 			else
 				sResult = "Switch \"" + sSwitchName + "\" set to " + sState + " successfully.";
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
 		return true;
@@ -3987,8 +4929,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -4002,10 +4944,12 @@ namespace mcp		// Model Context Protocol
 		}
 		else
 		{
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			auto rc = m_mainworker.SwitchLight(device["idx"].asString(), "Set Level", std::to_string(iLevel), "", "", 0, "MCP");
 			sResult = (rc == MainWorker::eSwitchLightReturnCode::SL_ERROR)
 				? "Error setting dimmer level on \"" + sSwitchName + "\"."
 				: "Dimmer \"" + sSwitchName + "\" set to level " + std::to_string(iLevel) + ".";
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
 		return true;
@@ -4041,8 +4985,8 @@ namespace mcp		// Model Context Protocol
 		bool bFound;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
 		}
 		else
 		{
@@ -4056,10 +5000,12 @@ namespace mcp		// Model Context Protocol
 		}
 		else
 		{
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			auto rc = m_mainworker.SwitchLight(device["idx"].asString(), sCommand, "", "", "", 0, "MCP");
 			sResult = (rc == MainWorker::eSwitchLightReturnCode::SL_ERROR)
 				? "Error sending " + sCommand + " to \"" + sSwitchName + "\"."
 				: "Command " + sCommand + " sent to \"" + sSwitchName + "\" successfully.";
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
 		return true;
@@ -4090,9 +5036,9 @@ namespace mcp		// Model Context Protocol
 		uint64_t uIdx = 0;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
-			uIdx = (uint64_t)args["idx"].asInt();
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
+			uIdx = (uint64_t)jsonAsIdx(args["idx"]);
 		}
 		else
 		{
@@ -4123,10 +5069,12 @@ namespace mcp		// Model Context Protocol
 			if (bIsWhite)
 				color.mode = ColorModeWhite;
 
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			auto rc = m_mainworker.SwitchLight(uIdx, "Set Color", (unsigned char)iBrightness, color, false, 0, "MCP");
 			sResult = (rc == MainWorker::eSwitchLightReturnCode::SL_ERROR)
 				? "Error setting color on \"" + sSwitchName + "\"."
 				: "Color set on \"" + sSwitchName + "\": hue=" + std::to_string((int)fHue) + ", brightness=" + std::to_string(iBrightness) + ".";
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
 		return true;
@@ -4158,9 +5106,9 @@ namespace mcp		// Model Context Protocol
 		uint64_t uIdx = 0;
 		if (bHasIdx)
 		{
-			bFound = getDeviceByIdx(args["idx"].asInt(), device);
-			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(args["idx"].asInt());
-			uIdx = (uint64_t)args["idx"].asInt();
+			bFound = getDeviceByIdx(jsonAsIdx(args["idx"]), device);
+			sSwitchName = bFound ? device["Name"].asString() : "idx=" + std::to_string(jsonAsIdx(args["idx"]));
+			uIdx = (uint64_t)jsonAsIdx(args["idx"]);
 		}
 		else
 		{
@@ -4186,10 +5134,12 @@ namespace mcp		// Model Context Protocol
 		{
 			uint8_t tVal = (uint8_t)(int)round(iLevel * 255.0 / 100.0);
 			_tColor color(tVal, ColorModeTemp);
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			auto rc = m_mainworker.SwitchLight(uIdx, "Set Color", -1, color, false, 0, "MCP");
 			sResult = (rc == MainWorker::eSwitchLightReturnCode::SL_ERROR)
 				? "Error setting color temperature on \"" + sSwitchName + "\"."
 				: "Color temperature on \"" + sSwitchName + "\" set to " + std::to_string(iKelvin) + "K.";
+			SendProgress(tl_progressCtx.sid, tl_progressCtx.progressToken, 2, 2, "Command sent");
 		}
 		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
 		return true;
@@ -4201,7 +5151,7 @@ namespace mcp		// Model Context Protocol
 	bool getScenes(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
 	{
 		auto result = m_sql.safe_query(
-			"SELECT ID, Name, SceneType, LastUpdate, Status FROM Scenes ORDER BY Name");
+			"SELECT ID, Name, SceneType, nValue, LastUpdate FROM Scenes ORDER BY Name");
 
 		std::string sResult;
 		if (result.empty())
@@ -4216,12 +5166,10 @@ namespace mcp		// Model Context Protocol
 				std::string sIdx = row[0];
 				std::string sName = row[1];
 				int iSceneType = atoi(row[2].c_str());
-				std::string sLastUpdate = row[3];
-				std::string sStatus = row[4];
+				std::string sStatus = (atoi(row[3].c_str()) == 1) ? "On" : "Off";
+				std::string sLastUpdate = row[4];
 				std::string sType = (iSceneType == 1) ? "Group" : "Scene";
-				sResult += "- \"" + sName + "\" [" + sType + ", idx=" + sIdx;
-				if (!sStatus.empty())
-					sResult += ", Status=" + sStatus;
+				sResult += "- \"" + sName + "\" [" + sType + ", idx=" + sIdx + ", Status=" + sStatus;
 				if (!sLastUpdate.empty())
 					sResult += ", Last: " + sLastUpdate;
 				sResult += "]\n";
@@ -4281,7 +5229,9 @@ namespace mcp		// Model Context Protocol
 		else
 		{
 			std::string sIdx = result[0][0];
+			SendProgress(mcp::tl_progressCtx.sid, mcp::tl_progressCtx.progressToken, 0, 2, "Sending command to device");
 			bool bOk = m_mainworker.SwitchScene(sIdx, sCommand, "MCP");
+			SendProgress(mcp::tl_progressCtx.sid, mcp::tl_progressCtx.progressToken, 2, 2, "Command sent");
 			sResult = bOk
 				? "Scene \"" + sSceneName + "\" switched " + sCommand + " successfully."
 				: "Error switching scene \"" + sSceneName + "\".";
@@ -4438,6 +5388,48 @@ namespace mcp		// Model Context Protocol
 			}
 		}
 		mcp::setToolResult(jsonRPCRep, sResult, !bFound);
+		return true;
+	}
+
+	bool getSceneHistory(const Json::Value &jsonRequest, Json::Value &jsonRPCRep)
+	{
+		const Json::Value &args = jsonRequest["params"]["arguments"];
+		bool bHasId = args.isMember("scene_id");
+		bool bHasName = args.isMember("scenename") && !args["scenename"].asString().empty();
+		if (!bHasId && !bHasName)
+		{
+			_log.Debug(DEBUG_WEBSERVER, "MCP: getSceneHistory: Missing required parameter 'scenename' or 'scene_id'");
+			return false;
+		}
+
+		std::vector<std::vector<std::string>> scResult;
+		std::string sIdentifier;
+		if (bHasId)
+		{
+			int nSceneId = args["scene_id"].asInt();
+			sIdentifier = "idx=" + std::to_string(nSceneId);
+			scResult = m_sql.safe_query("SELECT ID, Name, SceneType FROM Scenes WHERE ID=%d", nSceneId);
+		}
+		else
+		{
+			std::string sName = args["scenename"].asString();
+			sIdentifier = "\"" + sName + "\"";
+			scResult = m_sql.safe_query("SELECT ID, Name, SceneType FROM Scenes WHERE Name='%q'", sName.c_str());
+		}
+
+		if (scResult.empty())
+		{
+			mcp::setToolResult(jsonRPCRep, "No scene or group exists with the name " + sIdentifier + ".", true);
+			return true;
+		}
+
+		const uint64_t nSceneIdx = (uint64_t)atoll(scResult[0][0].c_str());
+		std::string sSceneName = scResult[0][1];
+		std::string sLabel = (atoi(scResult[0][2].c_str()) == 1) ? "group" : "scene";
+
+		std::string sResult = buildEventHistory("SceneLog", "SceneRowID", "''",
+			nSceneIdx, sSceneName, sLabel, args);
+		mcp::setToolResult(jsonRPCRep, sResult, false);
 		return true;
 	}
 

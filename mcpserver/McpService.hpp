@@ -55,6 +55,7 @@ namespace mcp
 	bool getRooms(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool getRoomDevices(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool getSceneDevices(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
+	bool getSceneHistory(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 
 	bool getHardware(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool getSystemSettings(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
@@ -75,9 +76,11 @@ namespace mcp
 	bool getDevice(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool renameDevice(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool deleteDevice(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
+	bool hideDevice(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool createVirtualSensor(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool updateDeviceValue(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool getSensorHistory(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
+	bool getSensorShortLog(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 
 	bool getUserVariables(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);
 	bool addUserVariable(const Json::Value &jsonRequest, Json::Value &jsonRPCRep);

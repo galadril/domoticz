@@ -34,7 +34,7 @@ define([
                 ],
                 default: ''
             },
-            { key: 'planIdx',   type: 'number',  label: 'Limit to room/plan (ID)', required: false },
+            { key: 'planIdx',   type: 'number',  step: 1, label: 'Limit to room/plan (ID)', required: false },
             { key: 'showTabs',  type: 'boolean', label: 'Show category tabs',      default: true },
             { key: 'title',     type: 'text',    label: 'Custom Title',            required: false }
         ]
@@ -50,8 +50,8 @@ define([
             },
             controllerAs:     'ctrl',
             bindToController: true,
-            controller: ['$scope', '$http', '$interval', '$q', 'ddDeviceClassifier',
-                function($scope, $http, $interval, $q, ddDeviceClassifier) {
+            controller: ['$scope', '$http', '$q', 'ddDeviceClassifier',
+                function($scope, $http, $q, ddDeviceClassifier) {
                 var ctrl = this;
                 ctrl.categories     = [];
                 ctrl.activeCategory = null;
@@ -212,7 +212,6 @@ define([
                         var devices = ctrl.categories[i].devices;
                         for (var j = 0; j < devices.length; j++) {
                             if (String(devices[j].idx) === idx) {
-                                // Check device still belongs in its current category
                                 var catDef = null;
                                 for (var k = 0; k < CATEGORY_DEFS.length; k++) {
                                     if (CATEGORY_DEFS[k].key === ctrl.categories[i].key) { catDef = CATEGORY_DEFS[k]; break; }
@@ -227,13 +226,28 @@ define([
                             }
                         }
                     }
-                    load();
+                    // Device not in favorites list — ignore, no reload needed
                 });
-                $scope.$on('scene_update',  load);
+                $scope.$on('scene_update', function(e, updated) {
+                    var idx = String(updated.idx);
+                    for (var i = 0; i < ctrl.categories.length; i++) {
+                        if (ctrl.categories[i].key !== 'scenes') { continue; }
+                        var scenes = ctrl.categories[i].devices;
+                        for (var j = 0; j < scenes.length; j++) {
+                            if (String(scenes[j].idx) === idx) {
+                                scenes[j] = updated;
+                                updateActiveDevices();
+                                return;
+                            }
+                        }
+                        break;
+                    }
+                    // Scene not in favorites list — ignore, no reload needed
+                });
                 $scope.$on('dd:widget:refresh', load);
+                $scope.$on('dd:page:visible',   load);
 
-                var timer = $interval(load, 60000);
-                $scope.$on('$destroy', function() { $interval.cancel(timer); });
+                $scope.$on('$destroy', function() {});
 
                 ctrl.$onInit = load;
             }]

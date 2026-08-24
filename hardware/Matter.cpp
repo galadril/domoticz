@@ -8,6 +8,7 @@
 #include "hardwaretypes.h"
 #include "../main/RFXtrx.h"
 #include "ColorSwitch.h"
+#include "../notifications/NotificationHelper.h"
 #include <json/json.h>
 #include <algorithm>
 #include <cmath>
@@ -55,16 +56,33 @@ static constexpr int CLUSTER_FLOW_MEASUREMENT          = 1028;  // 0x0404
 static constexpr int CLUSTER_RELATIVE_HUMIDITY         = 1029;  // 0x0405
 static constexpr int CLUSTER_OCCUPANCY_SENSING         = 1030;  // 0x0406
 static constexpr int CLUSTER_BOOLEAN_STATE             = 69;    // 0x0045
+static constexpr int CLUSTER_AIR_QUALITY               = 91;    // 0x005B
+static constexpr int CLUSTER_SMOKE_CO_ALARM            = 92;    // 0x005C
 static constexpr int CLUSTER_CO_CONCENTRATION          = 1036;  // 0x040C
 static constexpr int CLUSTER_CO2_CONCENTRATION         = 1037;  // 0x040D
 static constexpr int CLUSTER_NO2_CONCENTRATION         = 1043;  // 0x0413
+static constexpr int CLUSTER_OZONE_CONCENTRATION       = 1045;  // 0x0415
 static constexpr int CLUSTER_PM25_CONCENTRATION        = 1066;  // 0x042A
+static constexpr int CLUSTER_FORMALDEHYDE_CONCENTRATION = 1067; // 0x042B
+static constexpr int CLUSTER_PM1_CONCENTRATION         = 1068;  // 0x042C
 static constexpr int CLUSTER_PM10_CONCENTRATION        = 1069;  // 0x042D
+static constexpr int CLUSTER_TVOC_CONCENTRATION        = 1070;  // 0x042E
+static constexpr int CLUSTER_RADON_CONCENTRATION       = 1071;  // 0x042F
 static constexpr int CLUSTER_OPERATIONAL_CREDENTIALS      = 62;    // 0x003E OperationalCredentials
 static constexpr int CLUSTER_GENERIC_SWITCH              = 59;    // 0x003B GenericSwitch (button/latch)
 static constexpr int CLUSTER_COLOR_CONTROL               = 768;   // 0x0300 ColorControl
 static constexpr int CLUSTER_ELECTRICAL_POWER_MEAS      = 144;   // 0x0090 ElectricalPowerMeasurement (Matter 1.3+)
 static constexpr int CLUSTER_ELECTRICAL_ENERGY_MEAS     = 145;   // 0x0091 ElectricalEnergyMeasurement (Matter 1.3+)
+static constexpr int CLUSTER_RVC_RUN_MODE 				= 84;	//0x0054 rvc run mode
+static constexpr int CLUSTER_RVC_CLEAN_MODE				= 85;	//0x0055 rvc clean mode
+static constexpr int CLUSTER_RVC_OPERATIONAL_STATE		= 97;	//0x0061 rvc operational state
+static constexpr int CLUSTER_SERVICE_AREA				= 336;	//0x0150 service area
+
+// Matter device type IDs (Descriptor cluster DeviceTypeList), used to distinguish BooleanState device roles.
+static constexpr int DEVICE_TYPE_CONTACT_SENSOR         = 0x0015; // 21
+static constexpr int DEVICE_TYPE_WATER_FREEZE_DETECTOR  = 0x0041; // 65
+static constexpr int DEVICE_TYPE_WATER_LEAK_DETECTOR    = 0x0043; // 67
+static constexpr int DEVICE_TYPE_RAIN_SENSOR            = 0x0044; // 68
 
 // Matter attribute IDs used per cluster
 static constexpr int ATTR_ON_OFF                       = 0;
@@ -86,7 +104,7 @@ static constexpr int ATTR_CTRL_SEQ_OF_OPERATION        = 27;    // 0x001B Thermo
 static constexpr int ATTR_SYSTEM_MODE                  = 28;    // 0x001C Thermostat SystemModeEnum (writable)
 static constexpr int ATTR_ACTIVE_PRESET_HANDLE         = 78;    // 0x004E Thermostat (bytes, writable)
 static constexpr int ATTR_PRESETS                      = 80;    // 0x0050 Thermostat list of PresetStruct
-static constexpr int ATTR_CURRENT_POSITION_LIFT        = 10;    // 0x000A WindowCovering (0–10000, 0=open)
+static constexpr int ATTR_CURRENT_POSITION_LIFT        = 14;    // 0x000E WindowCovering CurrentPositionLiftPercent100ths (0-10000, 0=open)
 static constexpr int ATTR_FABRICS                       = 1;     // 0x0001 OperationalCredentials FabricDescriptor list
 static constexpr int ATTR_THREAD_CHANNEL               = 0;     // 0x0000 ThreadNetworkDiagnostics
 static constexpr int ATTR_THREAD_ROUTING_ROLE          = 1;     // 0x0001 ThreadNetworkDiagnostics (RoutingRoleEnum)
@@ -96,6 +114,7 @@ static constexpr int ATTR_THREAD_ROUTE_TABLE           = 8;     // 0x0008 Thread
 static constexpr int ATTR_THREAD_RLOC16                = 62;    // 0x003E ThreadNetworkDiagnostics (own RLOC16)
 static constexpr int ATTR_BATTERY_VOLTAGE              = 11;    // 0x000B PowerSource (mV × 1, so 2636 = 2.636 V)
 static constexpr int ATTR_BATTERY_PERCENT_REMAINING    = 12;    // 0x000C PowerSource (half-percent units, divide by 2)
+static constexpr int ATTR_BATTERY_CHARGE_STATE 		   = 26; 	// 0x001A PowerSource batChargeState
 static constexpr int ATTR_CUMULATIVE_ENERGY_IMPORTED   = 1;     // 0x0001 ElectricalEnergyMeasurement (struct, field "0" = mWh)
 static constexpr int ATTR_VOLTAGE                      = 4;     // 0x0004 ElectricalPowerMeasurement (mV)
 static constexpr int ATTR_ACTIVE_CURRENT               = 5;     // 0x0005 ElectricalPowerMeasurement (mA)
@@ -110,6 +129,18 @@ static constexpr int ATTR_COLOR_MODE                 = 8;     // 0x0008 ColorCon
 static constexpr int ATTR_COLOR_TEMP_PHYS_MIN        = 16395; // 0x400B ColorControl ColorTempPhysicalMinMireds
 static constexpr int ATTR_COLOR_TEMP_PHYS_MAX        = 16396; // 0x400C ColorControl ColorTempPhysicalMaxMireds
 static constexpr int ATTR_COLOR_CAPABILITIES         = 16394; // 0x400A ColorControl ColorCapabilitiesBitmap
+static constexpr int ATTR_SERVICE_AREA_SUPPORTED_AREAS = 0; 	// 0x0000 Supported Areas
+static constexpr int ATTR_SERVICE_AREA_SELECTED_AREAS = 2; 		// 0x0002 Selected Areas
+static constexpr int ATTR_RVC_RUN_SUPPORTED_MODE = 0; 			// 0x0000 Supported Mode
+static constexpr int ATTR_RVC_RUN_MODE_CURRENT_MODE  = 1; 		// 0x0001 Current Mode
+static constexpr int ATTR_RVC_CLEAN_MODE_SUPPORTED_MODE = 0; 	// 0x0000 Supported Mode
+static constexpr int ATTR_RVC_CLEAN_MODE_CURRENT_MODE = 1; 		// 0x0001 Current Mode
+static constexpr int ATTR_RVC_OPERATIONAL_STATE  = 4; 			// 0x0004 Operational State
+static constexpr int ATTR_RVC_OPERATIONAL_ERROR  = 5; 			// 0x0005 Operational Error
+static constexpr int ATTR_SMOKE_STATE            = 1;    // 0x0001 SmokeCoAlarm SmokeState (AlarmStateEnum)
+static constexpr int ATTR_CO_ALARM_STATE         = 2;    // 0x0002 SmokeCoAlarm COState (AlarmStateEnum)
+static constexpr int ATTR_AIR_QUALITY            = 0;    // 0x0000 AirQuality AirQualityEnum
+static constexpr int ATTR_DEVICE_TYPE_LIST       = 0;    // 0x0000 Descriptor DeviceTypeList (list of DeviceTypeStruct)
 
 // ChildID slot offsets — unique sensor type identifiers within a domoticzID.
 // domoticzID already encodes the endpoint (nodeId * 256 + endpointId), so no
@@ -130,6 +161,72 @@ static constexpr int CHILD_PRESET       = 13;
 static constexpr int CHILD_CTRL_SEQ     = 14;
 static constexpr int CHILD_SWITCH       = 15;
 static constexpr int CHILD_FREQ         = 16;
+static constexpr int CHILD_SMOKE        = 17;
+static constexpr int CHILD_CO_ALARM     = 18;
+static constexpr int CHILD_TVOC         = 19;
+static constexpr int CHILD_OZONE        = 20;
+static constexpr int CHILD_FORMALDEHYDE = 21;
+static constexpr int CHILD_PM1          = 22;
+static constexpr int CHILD_RADON        = 23;
+static constexpr int CHILD_AIR_QUALITY  = 24;
+// rechargeable batteries
+static constexpr int CHILD_BAT_PERCENT_REMAINING  = 1;
+static constexpr int CHILD_BAT_CHARGE_STATE  = 2;
+static constexpr int  BatChargeState_kUnknown = 0;
+static constexpr int  BatChargeState_kIsCharging = 1;
+static constexpr int  BatChargeState_kIsAtFullCharge = 2;
+static constexpr int  BatChargeState_kIsNotCharging = 3;
+
+// service areas
+static constexpr int CHILD_SUPPORTED_AREAS = 3;
+
+// Robot Vacuum Cleaner (RVC)
+static constexpr int CHILD_RVC_CLEAN_MODE  = 4;
+static constexpr int CHILD_RVC_GO_HOME  = 5;
+static constexpr int CHILD_RVC_START_PAUSE_STOP  = 6;
+static constexpr int CHILD_RVC_RUN_MODE = 7;
+static constexpr int CHILD_RVC_OPERATIONAL_STATE = 8;
+static constexpr int CHILD_RVC_OPERATIONAL_ERROR = 9;
+
+// Selector switch RVC START_PAUSE_STOP
+static constexpr int rvcStartOrResume = 10;
+static constexpr int rvcPause = 20;
+static constexpr int rvcStop = 30;
+
+// Operational State List in RVC
+static constexpr int OperationalState_kStopped = 0;
+static constexpr int OperationalState_kRunning = 1;
+static constexpr int OperationalState_kPaused = 2;
+static constexpr int OperationalState_kError = 3;
+static constexpr int OperationalState_kSeekingCharger = 64;
+static constexpr int OperationalState_kCharging = 65;
+static constexpr int OperationalState_kDocked = 66;
+static constexpr int OperationalState_kEmptyingDustBin = 67;
+static constexpr int OperationalState_kCleaningMop = 68;
+static constexpr int OperationalState_kFillingWaterTank = 69;
+static constexpr int OperationalState_kUpdatingMaps = 70;
+
+// Operational Error List in RVC
+static constexpr int OperationalError_kNoError = 0;
+static constexpr int OperationalError_kUnableToStartOrResume = 1;
+static constexpr int OperationalError_kUnableToCompleteOperation = 2;
+static constexpr int OperationalError_kCommandInvalidInState = 3;
+static constexpr int OperationalError_kFailedToFindChargingDock = 64;
+static constexpr int OperationalError_kStuck = 65;
+static constexpr int OperationalError_kDustBinMissing = 66;
+static constexpr int OperationalError_kDustBinFull = 67;
+static constexpr int OperationalError_kWaterTankEmpty = 68;
+static constexpr int OperationalError_kWaterTankMissing = 69;
+static constexpr int OperationalError_kWaterTankLidOpen = 70;
+static constexpr int OperationalError_kMopCleaningPadMissing = 71;
+static constexpr int OperationalError_kLowBattery = 72;
+static constexpr int OperationalError_kCannotReachTargetArea = 73;
+static constexpr int OperationalError_kDirtyWaterTankFull = 74;
+static constexpr int OperationalError_kDirtyWaterTankMissing = 75;
+static constexpr int OperationalError_kWheelsJammed = 76;
+static constexpr int OperationalError_kBrushJammed = 77;
+static constexpr int OperationalError_kNavigationSensorObscured = 78;
+
 
 // Non-contiguous SystemModeEnum values in selector-level order (level = index * 10)
 static constexpr int SYSTEM_MODE_VALUES[]    = {0, 1, 3, 4, 5, 6, 7, 8, 9};
@@ -150,6 +247,7 @@ CMatter::~CMatter()
 
 bool CMatter::StartHardware()
 {
+	SetReconnectDelay(0); // Do_Work drives reconnects; disable ASyncTCP's internal reconnect to avoid racing connect() calls
 	RequestStart();
 	{
 		auto rows = m_sql.safe_query("SELECT Extra FROM Hardware WHERE (ID=%d)", m_HwdID);
@@ -377,6 +475,10 @@ void CMatter::HandleEvent(const Json::Value& msg)
 		std::lock_guard<std::mutex> lock(m_stateMutex);
 		m_nodes.erase(nodeId);
 	}
+	else if (event_type == "NODE_EVENT")
+	{
+		HandleNodeEvent(data);
+	}
 	else if (event_type == "ATTRIBUTE_UPDATED")
 	{
 		HandleAttributeUpdate(data);
@@ -387,6 +489,43 @@ void CMatter::HandleEvent(const Json::Value& msg)
 		m_bConnected = false;
 		disconnectWS();
 	}
+}
+
+
+void CMatter::HandleNodeEvent(const Json::Value& node_event)
+{
+	
+	// NodeEvent data model
+	// node_id: int, endpoint_id: int, cluster_id: int, event_id: int, event_number: int, priority: int, timestamp: int, timestamp_type: int, data: dict[str, Any] | None
+	int nodeId = -1;
+	int endpointId = -1;
+	int clusterId = -1;
+	if (node_event.isObject())
+	{		
+		// Event Error management
+		if (node_event.isMember("node_id"))
+			nodeId = node_event["node_id"].asInt();
+		if (node_event.isMember("endpoint_id"))
+			endpointId = node_event["endpoint_id"].asInt();
+		if (node_event.isMember("cluster_id"))
+			clusterId = node_event["cluster_id"].asInt();
+		if (node_event.isMember("data") && node_event["data"].isObject())
+		{
+			const Json::Value& data = node_event["data"];
+			// Robot Vacuum and Cleaner Error State management
+			if (data.isMember("errorState") && data["errorState"].isObject())
+			{
+				const Json::Value& errorState = data["errorState"];
+				if (errorState.isMember("errorStateId") && errorState["errorStateId"].isInt())
+				{
+					int operationalError=errorState["errorStateId"].asInt();
+					std::string szOperationalErrorLabel=Getrvc_OperationalErrorLabel(operationalError);
+					if (operationalError!=0)
+						Log(LOG_ERROR, "Node %d Endpoint %d Cluster %d rvc_OperationalError %s", nodeId, endpointId, clusterId, szOperationalErrorLabel.c_str());
+				}
+			}	
+		}
+	}	
 }
 
 void CMatter::HandleNode(const Json::Value& nodeData)
@@ -467,7 +606,10 @@ void CMatter::HandleAttributeUpdate(const Json::Value& data)
 
 	int node_id = data[0].asInt();
 	if (node_id < 1 || node_id > 255)
+	{	
+		Log(LOG_ERROR, "Unexpected node id %d", node_id );
 		return;
+	}
 
 	const std::string attr_path = data[1].asString();
 	size_t p1 = attr_path.find('/');
@@ -522,6 +664,23 @@ void CMatter::ApplyAttributeToState(int cluster_id, int attr_id, const Json::Val
 	switch (cluster_id)
 	{
 		case CLUSTER_DESCRIPTION:
+			if (attr_id == ATTR_DEVICE_TYPE_LIST && v.isArray())
+			{
+				for (const auto& dt : v)
+				{
+					if (!dt.isObject() || !dt.isMember("0") || !dt["0"].isIntegral())
+						continue;
+					int devType = dt["0"].asInt();
+					if (devType == DEVICE_TYPE_CONTACT_SENSOR || devType == DEVICE_TYPE_WATER_FREEZE_DETECTOR ||
+					    devType == DEVICE_TYPE_WATER_LEAK_DETECTOR || devType == DEVICE_TYPE_RAIN_SENSOR)
+					{
+						state.deviceType    = devType;
+						state.hasDeviceType = true;
+						break;
+					}
+				}
+			}
+			break;
 		case 31: //0x001F AccessControl
 		case CLUSTER_BASIC_INFORMATION:
 		case 42: //0x002A OtaSoftwareUpdateRequestor
@@ -533,6 +692,18 @@ void CMatter::ApplyAttributeToState(int cluster_id, int attr_id, const Json::Val
 		case 62: //0x003E OperationalCredentials
 		case 63: //0x003F GroupKeyManagement
 		case 70: //0x0046 IcdManagement
+			break;
+		case CLUSTER_POWER_SOURCE:		// rechargeable batteries
+			if (attr_id == ATTR_BATTERY_PERCENT_REMAINING && v.isIntegral())
+			{
+				state.rechargeable_battery_pct = v.asInt() / 2;
+				state.hasRechargeableBattery = true;
+			}	
+			else if (attr_id == ATTR_BATTERY_CHARGE_STATE && v.isIntegral())
+			{
+				state.rechargeable_battery_charge_state = v.asInt();
+				state.hasRechargeableBattery = true;
+			}
 			break;
 		case CLUSTER_ON_OFF:
 			if (attr_id == ATTR_ON_OFF)
@@ -603,6 +774,25 @@ void CMatter::ApplyAttributeToState(int cluster_id, int attr_id, const Json::Val
 				state.hasContact = true;
 			}
 			break;
+		case CLUSTER_AIR_QUALITY:
+			if (attr_id == ATTR_AIR_QUALITY)
+			{
+				state.airQuality    = v.asInt();
+				state.hasAirQuality = true;
+			}
+			break;
+		case CLUSTER_SMOKE_CO_ALARM:
+			if (attr_id == ATTR_SMOKE_STATE) // AlarmStateEnum: 0=Normal, 1=Warning, 2=Critical
+			{
+				state.smokeAlarm = v.asInt() >= 1;
+				state.hasSmoke   = true;
+			}
+			else if (attr_id == ATTR_CO_ALARM_STATE) // AlarmStateEnum: 0=Normal, 1=Warning, 2=Critical
+			{
+				state.coAlarm    = v.asInt() >= 1;
+				state.hasCOAlarm = true;
+			}
+			break;
 		case CLUSTER_THERMOSTAT:
 			if (attr_id == ATTR_LOCAL_TEMPERATURE)
 			{
@@ -669,10 +859,11 @@ void CMatter::ApplyAttributeToState(int cluster_id, int attr_id, const Json::Val
 			}
 			break;
 		case CLUSTER_WINDOW_COVERING:
-			if (attr_id == ATTR_CURRENT_POSITION_LIFT)
+			if (attr_id == ATTR_CURRENT_POSITION_LIFT && v.isIntegral())
 			{
 				// 0=fully open, 10000=fully closed → invert to open percentage
-				state.blind_pct = (10000.0 - v.asFloat()) / 100.0;
+				double raw = std::max(0.0, std::min(10000.0, v.asDouble()));
+				state.blind_pct = (10000.0 - raw) / 100.0;
 				state.hasBlind  = true;
 			}
 			break;
@@ -709,6 +900,41 @@ void CMatter::ApplyAttributeToState(int cluster_id, int attr_id, const Json::Val
 			{
 				state.pm10_ugm3 = v.asFloat();
 				state.hasPM10   = true;
+			}
+			break;
+		case CLUSTER_OZONE_CONCENTRATION:
+			if (attr_id == ATTR_MEASURED_VALUE)
+			{
+				state.ozone_ppb = v.asFloat();
+				state.hasOzone  = true;
+			}
+			break;
+		case CLUSTER_FORMALDEHYDE_CONCENTRATION:
+			if (attr_id == ATTR_MEASURED_VALUE)
+			{
+				state.formaldehyde_ppb = v.asFloat();
+				state.hasFormaldehyde  = true;
+			}
+			break;
+		case CLUSTER_PM1_CONCENTRATION:
+			if (attr_id == ATTR_MEASURED_VALUE)
+			{
+				state.pm1_ugm3 = v.asFloat();
+				state.hasPM1   = true;
+			}
+			break;
+		case CLUSTER_TVOC_CONCENTRATION:
+			if (attr_id == ATTR_MEASURED_VALUE)
+			{
+				state.tvoc_ppb = v.asFloat();
+				state.hasTVOC  = true;
+			}
+			break;
+		case CLUSTER_RADON_CONCENTRATION:
+			if (attr_id == ATTR_MEASURED_VALUE)
+			{
+				state.radon_Bqm3 = v.asFloat();
+				state.hasRadon   = true;
 			}
 			break;
 		case CLUSTER_ELECTRICAL_POWER_MEAS:
@@ -784,6 +1010,152 @@ void CMatter::ApplyAttributeToState(int cluster_id, int attr_id, const Json::Val
 				state.colorTempMaxMireds = v.asInt();
 			else if (attr_id == ATTR_COLOR_CAPABILITIES && v.isIntegral())
 				state.colorCapabilities = v.asInt();
+			break;
+		case CLUSTER_SERVICE_AREA:
+			if (attr_id==ATTR_SERVICE_AREA_SUPPORTED_AREAS && v.isArray())
+			{
+				state.hasAreas  = true;
+				// build the supported areas
+				state.areaEntries.clear();
+				for (const auto& area : v)
+				{
+					if (!area.isObject()) continue;
+					EndpointState::areaEntry entry;
+					if (area.isMember("0") && area["0"].isInt())						// AreaID
+						entry.areaId = area["0"].asInt();
+					if (area.isMember("1") && area["1"].isInt())						// MapID
+						entry.mapId = area["1"].asInt();
+					entry.locationName = "";
+					if (area.isMember("2") && area["2"].isObject())
+					{
+						// AreaInfo
+						const auto& areaInfo=area["2"];
+						if (areaInfo.isMember("0") && areaInfo["0"].isObject())
+						{
+							// LocationInfo
+							const auto& locationInfo = areaInfo["0"];	
+							if (locationInfo.isMember("0"))
+							{
+								if (locationInfo["0"]!=Json::Value::null)
+								{
+									if (locationInfo["0"].isString())
+										entry.locationName = locationInfo["0"].asString().c_str();
+									if (locationInfo.isMember("1") && locationInfo["1"].isInt())
+										entry.floorNumber = locationInfo["1"].asInt();
+									if (locationInfo.isMember("2"))
+									{
+										if (locationInfo["2"]==Json::Value::null)
+											entry.locationName="";
+										else if (locationInfo["2"].isInt())
+											entry.areaType= locationInfo["2"].asInt();
+									}
+								}
+							}
+						}
+					}
+					if (entry.locationName != "")
+					{
+						Log(LOG_DEBUG_INT, "SERVICE AREA ENTRY : areaId %d mapId %d location %s floorNumber %d areaType %d",entry.areaId, entry.mapId, entry.locationName.c_str(), entry.floorNumber, entry.areaType );
+						state.areaEntries.push_back(std::move(entry));
+					}	
+				}
+			}
+			else if (attr_id==ATTR_SERVICE_AREA_SELECTED_AREAS && v.isArray())
+			{
+				state.currentArea=0;			// default to all areas
+				for (const auto& areaId : v)
+				{
+					if (!areaId.isInt()) continue;
+					state.currentArea = areaId.asInt();
+					Log(LOG_DEBUG_INT, "ATTR_SERVICE_AREA_SELECTED_AREAS : Attrib %d current Area %d ",attr_id, state.currentArea );
+				}
+				if (state.currentArea==0)
+					Log(LOG_DEBUG_INT, "ATTR_SERVICE_AREA_SELECTED_AREAS : Attrib %d current Area %d all areas selected",attr_id, state.currentArea );
+			}
+			break;
+		case CLUSTER_RVC_RUN_MODE:
+			if (attr_id==ATTR_RVC_RUN_SUPPORTED_MODE && v.isArray())
+			{
+				// build the supported clean modes and identify the idle mode and the clean mode
+				state.rvc_RunModeEntries.clear();
+				state.rvc_IdleRunMode=-1;
+				state.rvc_CleanRunMode=-1;
+				for (const auto& mode : v)
+				{
+					if (!mode.isObject()) continue;
+					EndpointState::rvc_RunModeEntry entry;
+					if (mode.isMember("label") && mode["label"].isString())
+						entry.label = mode["label"].asString().c_str();	// run mode label
+					if (mode.isMember("mode") && mode["mode"].isIntegral())
+						entry.mode = mode["mode"].asInt();				// run mode
+					if (mode.isMember("modeTags") && mode["modeTags"].isArray())
+					{
+						std::vector<int> RunModeTags;
+						RunModeTags.clear();
+						for (const auto& modeTag : mode["modeTags"])
+						{
+							int MT = modeTag["value"].asInt();
+							RunModeTags.push_back(std::move(MT));
+							if (MT==16384)		// identify the idle mode
+								state.rvc_IdleRunMode=entry.mode;
+							if (MT==16385)		// identify a Cleaner mode
+								state.rvc_CleanRunMode=entry.mode;
+						}	
+						entry.RunModeTags = RunModeTags;
+					}
+					Log(LOG_DEBUG_INT, "RVC_RUN_MODE : mode %d label %s IdleRunMode %d CleanRunMode %d",entry.mode, entry.label.c_str(),state.rvc_IdleRunMode, state.rvc_CleanRunMode );
+					state.rvc_RunModeEntries.push_back(std::move(entry));
+				}
+				if (state.rvc_IdleRunMode==-1)
+					Log(LOG_ERROR, "rvc_run_mode : no idle run mode defined");
+				if (state.rvc_CleanRunMode==-1)
+					Log(LOG_ERROR, "rvc_run_mode : no clean run mode defined");
+			}
+			else if (attr_id==ATTR_RVC_RUN_MODE_CURRENT_MODE && v.isIntegral() && v.asInt() >= 0)
+			{
+				Log(LOG_DEBUG_INT, "RVC_CURRENT_RUN_MODE : Attrib %d Value %d ",attr_id, v.asInt() );
+				state.rvc_CurrentRunMode = v.asInt();
+				state.hasRvc_RunMode  = true;
+			}
+			break;
+		case CLUSTER_RVC_CLEAN_MODE:
+			if (attr_id==ATTR_RVC_CLEAN_MODE_SUPPORTED_MODE && v.isArray())
+			{
+				// build the supported clean modes
+				state.rvc_CleanModeEntries.clear();
+				for (const auto& mode : v)
+				{
+					if (!mode.isObject()) continue;
+					EndpointState::rvc_CleanModeEntry entry;
+					if (mode.isMember("label") && mode["label"].isString())
+						entry.label = mode["label"].asString().c_str();
+					if (mode.isMember("mode") && mode["mode"].isIntegral())
+						entry.mode = mode["mode"].asInt();
+					Log(LOG_DEBUG_INT, "RVC_CLEAN_MODE : mode %d label %s ",entry.mode, entry.label.c_str() );
+					state.rvc_CleanModeEntries.push_back(std::move(entry));
+				}
+			}
+			else if (attr_id==ATTR_RVC_CLEAN_MODE_CURRENT_MODE && v.isIntegral() && v.asInt() >= 0)
+			{
+				Log(LOG_DEBUG_INT, "RVC_CURRENT_CLEAN_MODE : Attrib %d Value %d ",attr_id, v.asInt() );
+				state.rvc_CurrentCleanMode = v.asInt();
+				state.hasRvc_CleanMode  = true;
+			}
+			break;
+		case CLUSTER_RVC_OPERATIONAL_STATE:
+			if (attr_id==ATTR_RVC_OPERATIONAL_STATE && v.isIntegral() && v.asInt() >= 0)
+			{
+				state.rvc_OperationalState = v.asInt();
+				state.hasRvc_OperationalState  = true;
+				Log(LOG_DEBUG_INT, "RVC_OPERATIONAL_STATE : Attrib %d Value %d ",attr_id, state.rvc_OperationalState );
+			}
+			else if (attr_id==ATTR_RVC_OPERATIONAL_ERROR && v.isObject() && v.isMember("0"))
+			{
+				state.rvc_OperationalError = v["0"].asInt();
+				state.hasRvc_OperationalState  = true;
+				if (state.rvc_OperationalError!=OperationalError_kNoError)
+					Log(LOG_ERROR, "RVC_OPERATIONAL_ERROR : Attrib %d Value %d ",attr_id, state.rvc_OperationalError );
+			}
 			break;
 		default:
 			break;
@@ -935,7 +1307,10 @@ void CMatter::_DetectAndSendNode(int nodeId)
 {
 	auto nodeIt = m_nodes.find(nodeId);
 	if (nodeIt == m_nodes.end())
+	{	
+		Log(LOG_DEBUG_INT, "Node %d is not found – skipping device update", nodeId);
 		return;
+	}
 	auto& node = nodeIt->second;
 
 	if (!node.available)
@@ -1019,7 +1394,7 @@ void CMatter::SendGeneralSwitchInt(int domoticzID, int unit, int battery, int va
 	snprintf(szDevID, sizeof(szDevID), "%08X", (unsigned int)domoticzID);
 	bool isNew = m_sql.safe_query(
 		"SELECT ID FROM DeviceStatus WHERE HardwareID=%d AND DeviceID='%q' AND Unit=%d AND Type=%d AND SubType=%d",
-		m_HwdID, szDevID, unit, pTypeGeneralSwitch, sSwitchTypeAC).empty();
+		m_HwdID, szDevID, unit, pTypeGeneralSwitch, switchType).empty();
 
 	_tGeneralSwitch gSwitch;
 	gSwitch.id = domoticzID;
@@ -1029,6 +1404,30 @@ void CMatter::SendGeneralSwitchInt(int domoticzID, int unit, int battery, int va
 	gSwitch.battery_level = (uint8_t)battery;
 	m_mainworker.PushAndWaitRxMessage(this, (const uint8_t*)&gSwitch, label.c_str(), battery, m_Name.c_str());
 	_ApplySwitchTypeOnCreate(domoticzID, unit, isNew, switchType);
+}
+
+// SendAlertSensor cannot be used here: its underlying _tGeneralDevice.id is a uint8_t, and
+// decode_General always keys sTypeAlert devices off that byte (never off intval1 like sTypeCustom
+// does), so any domoticzID (nodeId * 256 + endpointId) passed through it collapses to its low
+// byte and endpoints on different nodes can collide. Store the Alert device directly instead,
+// using the same full hex DeviceID format as SendGeneralSwitchInt/_ApplySwitchTypeOnCreate.
+void CMatter::_SendAlertSensorFullId(int domoticzID, int unit, int battery, int alertLevel, const std::string& text, const std::string& label)
+{
+	char szDevID[16];
+	snprintf(szDevID, sizeof(szDevID), "%08X", (unsigned int)domoticzID);
+	std::string ID = szDevID;
+
+	char szValue[128];
+	if (!text.empty())
+		snprintf(szValue, sizeof(szValue), "(%d) %.100s", alertLevel, text.c_str());
+	else
+		snprintf(szValue, sizeof(szValue), "%d", alertLevel);
+
+	std::string devName = label;
+	uint64_t DevRowIdx = m_sql.UpdateValue(m_HwdID, 0, ID.c_str(), (unsigned char)unit, pTypeGeneral, sTypeAlert,
+	                                        12, (unsigned char)battery, alertLevel, szValue, devName, true);
+	if (DevRowIdx != (uint64_t)-1)
+		m_notifications.CheckAndHandleNotification(DevRowIdx, m_HwdID, ID, devName, (unsigned char)unit, pTypeGeneral, sTypeAlert, alertLevel, szValue);
 }
 
 // Must be called with m_stateMutex already held.
@@ -1047,7 +1446,36 @@ void CMatter::_DetectAndSend(int nodeId, int endpointId)
 	const auto& state = epIt->second;
 	int battery = nodeIt->second.battery_pct;
 	int domoticzID = nodeId * 256 + endpointId;
-
+	if (state.hasRechargeableBattery)
+	{
+		// Battery Percent Remaining
+		SendPercentageSensor(domoticzID, CHILD_BAT_PERCENT_REMAINING, 255, (float)state.rechargeable_battery_pct, state.label + "_BatPercentRemaining");
+		// Battery State
+		std::string szBatteryChargeState="Unknown";
+		switch (state.rechargeable_battery_charge_state)
+		{
+			case BatChargeState_kIsCharging : szBatteryChargeState="IsCharging"; break;
+			case BatChargeState_kIsAtFullCharge : szBatteryChargeState="IsAtFullCharge"; break;
+			case BatChargeState_kIsNotCharging : szBatteryChargeState="IsNotCharging"; break;
+		}
+		SendTextSensor(domoticzID, CHILD_BAT_CHARGE_STATE, 255, szBatteryChargeState, state.label + "_BatChargeState" );
+	}		
+	if (state.hasAreas && !state.areaEntries.empty())
+	{
+		// state.currentArea=0 (levelArea 10) select All areas, otherwise subsequent state.currentArea=i (level i*10) select the area which areaId=i
+		int levelArea=10;	
+		std::string area_Names   = "Off| ";		// " " for all areas
+		std::string area_Actions = "|";
+		for (int i = 0; i < (int)state.areaEntries.size(); i++)
+		{
+			const auto& areaEntry = state.areaEntries[i];
+			area_Names  += "|" + areaEntry.locationName;
+			area_Actions += "|";
+			if (state.currentArea==areaEntry.areaId)
+				levelArea=(i+2)*10;
+		}
+		SendSelectorSwitch(domoticzID, CHILD_SUPPORTED_AREAS, std::to_string(levelArea), state.label + "_Areas" , 0, true, area_Names.c_str(), area_Actions.c_str(), true, "");
+	}
 	if (state.hasPower && !state.hasEnergy)
 		SendWattMeter(domoticzID, endpointId, battery, static_cast<float>(state.power_W), state.label);
 	if (state.hasEnergy)
@@ -1137,7 +1565,60 @@ void CMatter::_DetectAndSend(int nodeId, int endpointId)
 	}
 
 	if (state.hasContact)
-		SendGeneralSwitchInt(domoticzID, CHILD_CONTACT, battery, state.contact ? 1 : 0, 0, state.label, STYPE_DoorContact);
+	{
+		_eSwitchType contactSwitchType = STYPE_DoorContact;
+		std::string contactLabel = state.label;
+		bool bContactState = state.contact;
+		if (state.hasDeviceType)
+		{
+			if (state.deviceType == DEVICE_TYPE_WATER_LEAK_DETECTOR)
+			{
+				contactSwitchType = STYPE_Contact;
+				contactLabel += " Leak";
+			}
+			else if (state.deviceType == DEVICE_TYPE_RAIN_SENSOR)
+			{
+				contactSwitchType = STYPE_Contact;
+				contactLabel += " Rain";
+			}
+			else if (state.deviceType == DEVICE_TYPE_WATER_FREEZE_DETECTOR)
+			{
+				contactSwitchType = STYPE_Contact;
+				contactLabel += " Freeze";
+			}
+		}
+		if (contactSwitchType == STYPE_DoorContact)
+		{
+			//The Matter BooleanState cluster reports true when the contact is closed (magnet present),
+			//while Domoticz shows a Door Contact with value 1 as Open, so invert it here
+			bContactState = !bContactState;
+		}
+		SendGeneralSwitchInt(domoticzID, CHILD_CONTACT, battery, bContactState ? 1 : 0, 0, contactLabel, contactSwitchType);
+	}
+
+	if (state.hasSmoke)
+		SendGeneralSwitchInt(domoticzID, CHILD_SMOKE, battery, state.smokeAlarm ? 1 : 0, 0, state.label + " Smoke", STYPE_SMOKEDETECTOR);
+
+	if (state.hasCOAlarm)
+		SendGeneralSwitchInt(domoticzID, CHILD_CO_ALARM, battery, state.coAlarm ? 1 : 0, 0, state.label + " CO Alarm", STYPE_SMOKEDETECTOR);
+
+	if (state.hasAirQuality)
+	{
+		static const char* AirQualityNames[] = { "Unknown", "Good", "Fair", "Moderate", "Poor", "Very Poor", "Extremely Poor" };
+		int alertLevel;
+		switch (state.airQuality)
+		{
+			case 1: alertLevel = 1; break; // Good
+			case 2:
+			case 3: alertLevel = 2; break; // Fair, Moderate
+			case 4: alertLevel = 3; break; // Poor
+			case 5:
+			case 6: alertLevel = 4; break; // VeryPoor, ExtremelyPoor
+			default: alertLevel = 0; break; // Unknown
+		}
+		int nameIdx = (state.airQuality >= 0 && state.airQuality <= 6) ? state.airQuality : 0;
+		_SendAlertSensorFullId(domoticzID, CHILD_AIR_QUALITY, battery, alertLevel, AirQualityNames[nameIdx], state.label + " Air Quality");
+	}
 
 	if (state.hasCO2)
 		SendAirQualitySensor((uint8_t)nodeId, (uint8_t)endpointId, battery, state.co2_ppm, state.label);
@@ -1153,6 +1634,21 @@ void CMatter::_DetectAndSend(int nodeId, int endpointId)
 
 	if (state.hasPM10)
 		SendCustomSensor(domoticzID, CHILD_PM10, battery, state.pm10_ugm3, state.label + " PM10", "µg/m³");
+
+	if (state.hasPM1)
+		SendCustomSensor(domoticzID, CHILD_PM1, battery, state.pm1_ugm3, state.label + " PM1", "µg/m³");
+
+	if (state.hasTVOC)
+		SendCustomSensor(domoticzID, CHILD_TVOC, battery, state.tvoc_ppb, state.label + " TVOC", "ppb");
+
+	if (state.hasOzone)
+		SendCustomSensor(domoticzID, CHILD_OZONE, battery, state.ozone_ppb, state.label + " Ozone", "ppb");
+
+	if (state.hasFormaldehyde)
+		SendCustomSensor(domoticzID, CHILD_FORMALDEHYDE, battery, state.formaldehyde_ppb, state.label + " Formaldehyde", "ppb");
+
+	if (state.hasRadon)
+		SendCustomSensor(domoticzID, CHILD_RADON, battery, state.radon_Bqm3, state.label + " Radon", "Bq/m³");
 
 	if (state.hasFlow)
 		SendWaterflowSensor(domoticzID, CHILD_FLOW, battery, state.flow_lpm, state.label);
@@ -1221,6 +1717,82 @@ void CMatter::_DetectAndSend(int nodeId, int endpointId)
 
 	if (state.hasSwitch)
 		SendGeneralSwitchInt(domoticzID, CHILD_SWITCH, battery, state.switch_on ? 1 : 0, 0, state.label, STYPE_PushOn);
+
+	if (state.hasRvc_RunMode && !state.rvc_RunModeEntries.empty())
+	{
+		// RVC Run Mode
+		bool flCurrentRunModeFound=false;
+		for (const auto& rvc_RunModeEntry : state.rvc_RunModeEntries)
+		{
+			if (rvc_RunModeEntry.mode==state.rvc_CurrentRunMode)
+			{	
+				flCurrentRunModeFound=true;
+				std::string szRunMode=rvc_RunModeEntry.label.c_str();
+				SendTextSensor(domoticzID, CHILD_RVC_RUN_MODE, 255, szRunMode, state.label + "_RunMode" );
+				break;
+			}	
+		}
+		if (!flCurrentRunModeFound)
+		{	
+			SendTextSensor(domoticzID, CHILD_RVC_RUN_MODE, 255, "Unknown", state.label + "_RunMode" );
+			Log(LOG_ERROR, "rvc RunMode Node %d Endpoint %d DomoticzID %d Label %s RunMode %d not consistent", nodeId, endpointId,domoticzID,state.label.c_str(),state.rvc_CurrentRunMode);
+		}
+	}
+	if (state.hasRvc_CleanMode && !state.rvc_CleanModeEntries.empty())
+	{
+		// RVC Clean Mode
+		int levelCleanMode=10;
+		std::string Rvc_CleanMode_Names   = "Off";
+		std::string Rvc_CleanMode_Actions = "";
+		bool flCurrentCleanModeFound=false;
+		for (int i = 0; i < (int)state.rvc_CleanModeEntries.size(); i++)
+		{
+			const auto& CleanModeEntry = state.rvc_CleanModeEntries[i];
+			if (state.rvc_CurrentCleanMode==CleanModeEntry.mode)
+			{
+				flCurrentCleanModeFound=true;
+				levelCleanMode=(i+1)*10;
+			}
+			Rvc_CleanMode_Names  += "|" + CleanModeEntry.label;
+			Rvc_CleanMode_Actions += "|";
+		}
+		// rvc_CurrentCleanMode == 0 means the attribute hasn't been reported yet — not an error
+		if (!flCurrentCleanModeFound && state.rvc_CurrentCleanMode != 0)
+			Log(LOG_ERROR, "rvc CleanMode Node %d Endpoint %d DomoticzID %d Label %s CleanMode %d not consistent", nodeId, endpointId, domoticzID, state.label.c_str(), state.rvc_CurrentCleanMode);
+		SendSelectorSwitch(domoticzID, CHILD_RVC_CLEAN_MODE, std::to_string(levelCleanMode), state.label + "_CleanMode" , 0, true, Rvc_CleanMode_Names.c_str(), Rvc_CleanMode_Actions.c_str(), true, "");
+	}
+	if (state.hasRvc_OperationalState)
+	{
+		// RVC Operational State
+		int levelStartPauseStop=10; // running
+		switch (state.rvc_OperationalState)
+		{
+			case OperationalState_kStopped: levelStartPauseStop=30; break;
+			case OperationalState_kRunning: break;
+			case OperationalState_kPaused: levelStartPauseStop=20; break;
+			case OperationalState_kError: levelStartPauseStop=20; break;
+			case OperationalState_kSeekingCharger: break;
+			case OperationalState_kCharging: levelStartPauseStop=20; break;
+			case OperationalState_kDocked: levelStartPauseStop=20; break;
+			case OperationalState_kEmptyingDustBin: break;
+			case OperationalState_kCleaningMop: break;
+			case OperationalState_kFillingWaterTank: break;
+			case OperationalState_kUpdatingMaps: break;
+			default:
+				Log(LOG_ERROR, "Node %d Endpoint %d DomoticzID %d Label %s OperationalState incorrect %d", nodeId, endpointId,domoticzID,state.label.c_str(), state.rvc_OperationalState);
+		}
+		std::string szOperationalState=Getrvc_OperationalStateLabel(state.rvc_OperationalState);
+		SendTextSensor(domoticzID, CHILD_RVC_OPERATIONAL_STATE, 255, szOperationalState, state.label + "_OperationalState" );
+		// RVC Operational Error
+		std::string szOperationalError=Getrvc_OperationalErrorLabel(state.rvc_OperationalError);
+		SendTextSensor(domoticzID, CHILD_RVC_OPERATIONAL_ERROR, 255, szOperationalError, state.label + "_OperationalError" ); 
+		// RVC Start Pause Stop switch
+		static const std::string Rvc_StartPauseStop_Names   = "Off|Start|Pause|Stop";
+		static const std::string Rvc_StartPauseStop_Actions = "|||";
+		SendSelectorSwitch(domoticzID, CHILD_RVC_START_PAUSE_STOP, std::to_string(levelStartPauseStop), state.label + "_StartPauseStop" , 0, false, Rvc_StartPauseStop_Names, Rvc_StartPauseStop_Actions, true, "");
+		// RVC Go Home PushOn button
+		SendGeneralSwitchInt(domoticzID, CHILD_RVC_GO_HOME, 255, 0, 0, state.label + "_GoHome" , STYPE_PushOn);
+	}
 }
 
 std::string CMatter::ExtractLabel(const Json::Value& attrs, int nodeId, int endpointId) const
@@ -1389,18 +1961,18 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 			args["node_id"]      = nodeId;
 			args["endpoint_id"]  = endpointId;
 			args["cluster_id"]   = CLUSTER_LEVEL_CONTROL;
-			args["command_name"] = "move_to_level_with_on_off";
+			args["command_name"] = "MoveToLevelWithOnOff";
 			Json::Value payload;
 			payload["level"]           = matter_level;
 			payload["optionsMask"]     = 1;
 			payload["optionsOverride"] = 1;
-			payload["transition_time"] = 0;
+			payload["transitionTime"]  = 0;
 			args["payload"] = payload;
 			SendCommand("device_command", args);
 		};
 
-		if (pColor->command == Color_LedOff)   { sendOnOff("off"); return true; }
-		if (pColor->command == Color_LedOn)    { sendOnOff("on");  return true; }
+		if (pColor->command == Color_LedOff)   { sendOnOff("Off"); return true; }
+		if (pColor->command == Color_LedOn)    { sendOnOff("On");  return true; }
 
 		if (pColor->command == Color_SetBrightnessLevel)
 		{
@@ -1421,7 +1993,7 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 				args["node_id"]      = nodeId;
 				args["endpoint_id"]  = endpointId;
 				args["cluster_id"]   = CLUSTER_COLOR_CONTROL;
-				args["command_name"] = "move_to_color_temperature";
+				args["command_name"] = "MoveToColorTemperature";
 				Json::Value payload;
 				payload["colorTemperatureMireds"] = mireds;
 				payload["transitionTime"]         = 0;
@@ -1434,7 +2006,7 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 			{
 				if (supportsHS)
 				{
-					// Prefer move_to_hue_and_saturation on devices that support it (HS bit in ColorCapabilities)
+					// Prefer MoveToHueAndSaturation on devices that support it (HS bit in ColorCapabilities)
 					float hsbvals[3] = {0, 0, 0};
 					rgb2hsb(pColor->color.r, pColor->color.g, pColor->color.b, hsbvals);
 					// hsbvals[0]=hue 0-1, hsbvals[1]=saturation 0-1; Matter range is 0-254
@@ -1444,7 +2016,7 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 					args["node_id"]      = nodeId;
 					args["endpoint_id"]  = endpointId;
 					args["cluster_id"]   = CLUSTER_COLOR_CONTROL;
-					args["command_name"] = "move_to_hue_and_saturation";
+					args["command_name"] = "MoveToHueAndSaturation";
 					Json::Value payload;
 					payload["hue"]             = hue;
 					payload["saturation"]      = sat;
@@ -1470,7 +2042,7 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 					args["node_id"]      = nodeId;
 					args["endpoint_id"]  = endpointId;
 					args["cluster_id"]   = CLUSTER_COLOR_CONTROL;
-					args["command_name"] = "move_to_color";
+					args["command_name"] = "MoveToColor";
 					Json::Value payload;
 					payload["colorX"]          = cx;
 					payload["colorY"]          = cy;
@@ -1563,6 +2135,181 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 			SendCommand("write_attribute", args);
 			return true;
 		}
+		// Cluster CLUSTER_SERVICE_AREA - Select a specific area or all areas
+		if (pSwitch->unitcode == CHILD_SUPPORTED_AREAS)
+		{
+			int domoticzID = (int)pSwitch->id;
+			int nodeId     = domoticzID / 256;
+			int endpointId = domoticzID % 256;
+			int selectedArea;	
+			{
+				std::lock_guard<std::mutex> lock(m_stateMutex);
+				auto nodeIt = m_nodes.find(nodeId);
+				if (nodeIt == m_nodes.end())
+				{
+					Log(LOG_STATUS, "WriteToHardware: node %d endpoint %d not found", nodeId, endpointId);
+					return false;
+				}
+				auto epIt = nodeIt->second.endpoints.find(endpointId);
+				if (epIt == nodeIt->second.endpoints.end())
+					return false;
+				const auto& state = epIt->second;
+				// check level
+				if (pSwitch->level<10)
+					return false;
+				if (pSwitch->level==10)
+					selectedArea=0; // all areas
+				else 
+					selectedArea=state.areaEntries[pSwitch->level/10-2].areaId; // specific area
+			}
+			Json::Value args;
+			args["node_id"]      = nodeId;
+			args["endpoint_id"]  = endpointId;
+			args["cluster_id"]   = CLUSTER_SERVICE_AREA;
+			args["command_name"] = "SelectAreas";
+			if (selectedArea>0)
+			{
+				// select the area
+				Json::Value payload(Json::objectValue);
+				payload["newAreas"].append(static_cast<Json::UInt>(selectedArea));
+				args["payload"] = payload;
+				SendCommand("device_command", args);
+
+			}
+			else if (selectedArea==0)
+			{
+				// all areas allowed
+				Json::Value payload;
+				payload["newAreas"] = Json::Value(Json::arrayValue);
+				args["payload"] = payload;
+				SendCommand("device_command", args);
+			}	
+			else
+				return false;
+			return true;
+		}
+		// Cluster CLUSTER_RVC_CLEAN_MODE - Select the clean mode 
+		if (pSwitch->unitcode == CHILD_RVC_CLEAN_MODE)
+		{
+			int domoticzID = (int)pSwitch->id;
+			int nodeId     = domoticzID / 256;
+			int endpointId = domoticzID % 256;
+			int selectedCleanMode = 0;
+			{
+				std::lock_guard<std::mutex> lock(m_stateMutex);
+				auto nodeIt = m_nodes.find(nodeId);
+				if (nodeIt == m_nodes.end())
+				{
+					Log(LOG_STATUS, "WriteToHardware: node %d endpoint %d not found", nodeId, endpointId);
+					return false;
+				}
+				auto epIt = nodeIt->second.endpoints.find(endpointId);
+				if (epIt == nodeIt->second.endpoints.end())
+					return false;
+				const auto& state = epIt->second;
+				// selector level maps positionally to the entry list (level 10 = first entry)
+				int posIndex = pSwitch->level/10 - 1;
+				if (posIndex < 0 || posIndex >= (int)state.rvc_CleanModeEntries.size())
+				{
+					Log(LOG_ERROR, "WriteToHardware: node %d endpoint %d rvc clean mode index %d out of range", nodeId, endpointId, posIndex);
+					return false;
+				}
+				selectedCleanMode = state.rvc_CleanModeEntries[posIndex].mode;
+			}
+			Json::Value args;
+			args["node_id"]      = nodeId;
+			args["endpoint_id"]  = endpointId;
+			args["cluster_id"]   = CLUSTER_RVC_CLEAN_MODE;
+			args["command_name"] = "ChangeToMode";
+			Json::Value payload;
+			payload["newMode"] = selectedCleanMode;
+			args["payload"] = payload;
+			SendCommand("device_command", args);
+			return true;
+		}
+		// Cluster CLUSTER_RVC_RUN_MODE - Start/Resume, Pause, Stop the RVC
+		if (pSwitch->unitcode == CHILD_RVC_START_PAUSE_STOP)
+		{
+			int domoticzID = (int)pSwitch->id;
+			int nodeId     = domoticzID / 256;
+			int endpointId = domoticzID % 256;
+			int rvc_CurrentRunMode = 0;
+			int rvc_IdleRunMode = 0;
+			int rvc_CleanRunMode = 0;
+			{
+				std::lock_guard<std::mutex> lock(m_stateMutex);
+				auto nodeIt = m_nodes.find(nodeId);
+				if (nodeIt == m_nodes.end())
+				{
+					Log(LOG_STATUS, "WriteToHardware: node %d endpoint %d not found", nodeId, endpointId);
+					return false;
+				}
+				auto epIt = nodeIt->second.endpoints.find(endpointId);
+				if (epIt == nodeIt->second.endpoints.end())
+					return false;
+				const auto& state = epIt->second;
+				rvc_CurrentRunMode=state.rvc_CurrentRunMode;
+				rvc_IdleRunMode=state.rvc_IdleRunMode;
+				rvc_CleanRunMode=state.rvc_CleanRunMode;
+			}
+			Json::Value args;
+			args["node_id"]      = nodeId;
+			args["endpoint_id"]  = endpointId;
+			if (rvc_CurrentRunMode==rvc_IdleRunMode)
+			{	
+				// case idle 
+				switch (pSwitch->level)
+				{
+					case rvcStartOrResume : // Start Cleaning 
+					{
+						args["cluster_id"]   = CLUSTER_RVC_RUN_MODE;
+						args["command_name"] = "ChangeToMode";
+						Json::Value payload;
+						payload["newMode"] = rvc_CleanRunMode; 
+						args["payload"] = payload;
+						SendCommand("device_command", args);
+						return true;
+					}	
+				}	
+			}
+			else
+			{
+				// case cleaning 
+				switch (pSwitch->level)
+				{
+					case rvcStartOrResume :	// Resume
+					{
+						args["cluster_id"]   = CLUSTER_RVC_OPERATIONAL_STATE;
+						args["command_name"] = "Resume";
+						SendCommand("device_command", args);
+						break;
+					}	
+					case rvcPause :	// Pause 
+					{
+						args["cluster_id"]   = CLUSTER_RVC_OPERATIONAL_STATE;
+						args["command_name"] = "Pause";
+						SendCommand("device_command", args);
+						break;
+					}	
+					case rvcStop : 	// stop
+					{
+						args["cluster_id"]   = CLUSTER_RVC_RUN_MODE;
+						args["command_name"] = "ChangeToMode";
+						Json::Value payload;
+						payload["newMode"] = rvc_IdleRunMode; 
+						args["payload"] = payload;
+						SendCommand("device_command", args);
+						break;
+					}	
+					default:
+					{
+						Log(LOG_ERROR, "WriteToHardware Node %d Endpoint %d DomoticzID %d StartPauseStop command incorrect %d", nodeId, endpointId,domoticzID, pSwitch->level); 
+						return false;
+					}	
+				}	
+			}
+			return true;
+		}
 		return false;
 	}
 
@@ -1576,6 +2323,7 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 	uint8_t cmnd   = pSwitch->cmnd;
 
 	int levelMin = 1, levelMax = 254;
+	bool hasRvc_OperationalState=false;
 	{
 		std::lock_guard<std::mutex> lock(m_stateMutex);
 		auto nodeIt = m_nodes.find(nodeId);
@@ -1587,6 +2335,7 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 		const auto& ep = nodeIt->second.endpoints.at(endpointId);
 		levelMin = ep.levelMinLevel;
 		levelMax = ep.levelMaxLevel;
+		hasRvc_OperationalState=ep.hasRvc_OperationalState;
 	}
 
 	if (cmnd == gswitch_sSetLevel)
@@ -1599,12 +2348,12 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 		args["node_id"]      = nodeId;
 		args["endpoint_id"]  = endpointId;
 		args["cluster_id"]   = 8;
-		args["command_name"] = "move_to_level_with_on_off";
+		args["command_name"] = "MoveToLevelWithOnOff";
 		Json::Value payload;
 		payload["level"]           = matter_level;
 		payload["optionsMask"]     = 1;
 		payload["optionsOverride"] = 1;
-		payload["transition_time"] = 0;
+		payload["transitionTime"]  = 0;
 		args["payload"] = payload;
 		SendCommand("device_command", args);
 	}
@@ -1612,18 +2361,28 @@ bool CMatter::WriteToHardware(const char* pdata, unsigned char length)
 	{
 		std::string cmd;
 		if (cmnd == gswitch_sOn)
-			cmd = "on";
+			cmd = "On";
 		else if (cmnd == gswitch_sOff)
-			cmd = "off";
+			cmd = "Off";
 		else
-			cmd = "toggle";
+			cmd = "Toggle";
 
 		Json::Value args;
 		args["node_id"]      = nodeId;
 		args["endpoint_id"]  = endpointId;
-		args["cluster_id"]   = 6;
-		args["command_name"] = cmd;
-		args["payload"]      = Json::Value(Json::objectValue);
+		if ( hasRvc_OperationalState && pSwitch->unitcode == CHILD_RVC_GO_HOME && cmd == "On")
+		{
+			// Go Home push on button in the RVC implementation
+			args["cluster_id"]   = CLUSTER_RVC_OPERATIONAL_STATE;
+			args["command_name"] = "GoHome";
+		}
+		else
+		{	
+			// any other case of on off button
+			args["cluster_id"] = 6;
+			args["command_name"] = cmd;
+			args["payload"] = Json::Value(Json::objectValue);
+		}	
 		SendCommand("device_command", args);
 	}
 
@@ -1949,6 +2708,55 @@ void CMatter::SetFabricLabel(const std::string& label)
 	Json::Value args;
 	args["label"] = label;
 	SendCommand("set_default_fabric_label", args);
+}
+
+std::string CMatter::Getrvc_OperationalErrorLabel(int OperationalError)
+{
+	std::string szOperationalError="Undefined";
+	switch (OperationalError)
+	{
+		case OperationalError_kNoError: szOperationalError="NoError"; break;
+		case OperationalError_kUnableToStartOrResume: szOperationalError="UnableToStartOrResume"; break;
+		case OperationalError_kUnableToCompleteOperation: szOperationalError="UnableToCompleteOperation"; break;
+		case OperationalError_kCommandInvalidInState: szOperationalError="CommandInvalidInState"; break;
+		case OperationalError_kFailedToFindChargingDock: szOperationalError="FailedToFindChargingDock"; break;
+		case OperationalError_kStuck: szOperationalError="Stuck"; break;
+		case OperationalError_kDustBinMissing: szOperationalError="DustBinMissing"; break;
+		case OperationalError_kDustBinFull: szOperationalError="DustBinFull"; break;
+		case OperationalError_kWaterTankEmpty: szOperationalError="WaterTankEmpty"; break;
+		case OperationalError_kWaterTankMissing: szOperationalError="WaterTankMissing"; break;
+		case OperationalError_kWaterTankLidOpen: szOperationalError="WaterTankLidOpen"; break;
+		case OperationalError_kMopCleaningPadMissing: szOperationalError="MopCleaningPadMissing"; break;
+		case OperationalError_kLowBattery: szOperationalError="LowBattery"; break;
+		case OperationalError_kCannotReachTargetArea: szOperationalError="CannotReachTargetArea"; break;
+		case OperationalError_kDirtyWaterTankFull: szOperationalError="DirtyWaterTankFull"; break;
+		case OperationalError_kDirtyWaterTankMissing: szOperationalError="DirtyWaterTankMissing"; break;
+		case OperationalError_kWheelsJammed: szOperationalError="WheelsJammed"; break;
+		case OperationalError_kBrushJammed: szOperationalError="BrushJammed"; break;
+		case OperationalError_kNavigationSensorObscured: szOperationalError="NavigationSensorObscured"; break;
+	}
+	return szOperationalError;
+}
+
+
+std::string CMatter::Getrvc_OperationalStateLabel(int OperationalState)
+{
+	std::string szOperationalState="Undefined";
+	switch (OperationalState)
+	{
+		case OperationalState_kStopped: szOperationalState="Stopped"; break;
+		case OperationalState_kRunning: szOperationalState="Running"; break;
+		case OperationalState_kPaused: szOperationalState="Paused"; break;
+		case OperationalState_kError: szOperationalState="Error"; break;
+		case OperationalState_kSeekingCharger: szOperationalState="SeekingCharger"; break;
+		case OperationalState_kCharging: szOperationalState="Charging"; break;
+		case OperationalState_kDocked: szOperationalState="Docked"; break;
+		case OperationalState_kEmptyingDustBin: szOperationalState="EmptyingDustBin"; break;
+		case OperationalState_kCleaningMop: szOperationalState="CleaningMop"; break;
+		case OperationalState_kFillingWaterTank: szOperationalState="FillingWaterTank"; break;
+		case OperationalState_kUpdatingMaps: szOperationalState="UpdatingMaps"; break;
+	}
+	return szOperationalState;
 }
 
 namespace http {

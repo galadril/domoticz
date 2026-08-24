@@ -1,11 +1,12 @@
 define([
     'app',
-    'dashboardDynamic/widgetRegistry.service'
-], function(app, widgetRegistry) {
+    'dashboardDynamic/widgetRegistry.service',
+    'dashboardDynamic/ddVisibility.service'
+], function(app, widgetRegistry, ddVisibility) {
     'use strict';
 
     var WMO = {
-        0:  { icon: 'fa-sun',                 label: 'Clear Sky',               token: '--dz-widget-sunpv'   },
+        0:  { icon: 'fa-sun',                 label: 'Clear Sky',               token: '--dz-widget-amber'   },
         1:  { icon: 'fa-cloud-sun',           label: 'Mainly Clear',            token: '--dz-widget-weather-cloud' },
         2:  { icon: 'fa-cloud-sun',           label: 'Partly Cloudy',           token: '--dz-widget-weather-cloud' },
         3:  { icon: 'fa-cloud',               label: 'Overcast',                token: '--dz-widget-weather-cloud' },
@@ -35,7 +36,8 @@ define([
         99: { icon: 'fa-bolt',                label: 'Thunderstorm+Heavy Hail', token: '--dz-accent-red' }
     };
 
-    var CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+    var CACHE_TTL_MS  = 3 * 60 * 60 * 1000; // 3 hours
+    var _locationCache = null; // { lat, lon } — rarely changes, shared across instances
 
     widgetRegistry.register({
         type:        'weather-forecast',
@@ -53,6 +55,7 @@ define([
             {
                 key:      'days',
                 type:     'number',
+                step:     1,
                 label:    'Days to show (1–14)',
                 default:  7,
                 min:      1,
@@ -93,7 +96,7 @@ define([
             },
             controllerAs:     'ctrl',
             bindToController: true,
-            controller: ['$scope', '$http', '$interval', '$timeout', '$q', function($scope, $http, $interval, $timeout, $q) {
+            controller: ['$scope', '$http', '$interval', '$timeout', '$q', 'ddVisibility', function($scope, $http, $interval, $timeout, $q, ddVisibility) {
                 var ctrl       = this;
                 ctrl.days      = [];
                 ctrl.title     = '';
@@ -107,6 +110,7 @@ define([
                 var cancelLocation = null;
                 var cancelForecast = null;
                 var midnightTimer  = null;
+                var timer          = null;
 
                 function cfg() {
                     return (ctrl.widgetDef && ctrl.widgetDef.config) || {};
@@ -193,6 +197,11 @@ define([
                 function load() {
                     ctrl.error = null;
 
+                    if (_locationCache) {
+                        fetchForecast(_locationCache.lat, _locationCache.lon);
+                        return;
+                    }
+
                     if (cancelLocation) { cancelLocation.resolve(); }
                     cancelLocation = $q.defer();
 
@@ -208,6 +217,7 @@ define([
                             ctrl.error = 'Location not configured in Domoticz';
                             return;
                         }
+                        _locationCache = { lat: latF, lon: lonF };
                         fetchForecast(latF, lonF);
                     }).catch(function(err) {
                         if (err.status === -1) { return; }
@@ -216,6 +226,7 @@ define([
                 }
 
                 function scheduleMidnightRefresh() {
+                    if (midnightTimer) { $timeout.cancel(midnightTimer); midnightTimer = null; }
                     var now  = new Date();
                     var next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
                     var msUntilMidnight = next.getTime() - now.getTime();
@@ -226,17 +237,33 @@ define([
                     }, msUntilMidnight);
                 }
 
-                var timer = $interval(load, CACHE_TTL_MS);
-                scheduleMidnightRefresh();
+                function stopTimer() {
+                    if (timer) { $interval.cancel(timer); timer = null; }
+                }
+
+                function startTimer() {
+                    stopTimer();
+                    timer = $interval(load, CACHE_TTL_MS);
+                }
+
+                $scope.$on('dd:page:hidden',  function() {
+                    stopTimer();
+                    if (midnightTimer) { $timeout.cancel(midnightTimer); midnightTimer = null; }
+                });
+                $scope.$on('dd:page:visible', function() { load(); startTimer(); scheduleMidnightRefresh(); });
 
                 $scope.$on('$destroy', function() {
                     if (cancelLocation) { cancelLocation.resolve(); cancelLocation = null; }
                     if (cancelForecast) { cancelForecast.resolve(); cancelForecast = null; }
                     if (midnightTimer)  { $timeout.cancel(midnightTimer); midnightTimer = null; }
-                    $interval.cancel(timer);
+                    stopTimer();
                 });
 
-                $scope.$on('dd:widget:refresh', load);
+                $scope.$on('dd:widget:refresh', function() {
+                    _locationCache = null;
+                    ctrl._cache = { data: null, time: 0 };
+                    load();
+                });
 
                 $scope.$watch(
                     function() {
@@ -252,7 +279,13 @@ define([
                     }
                 );
 
-                ctrl.$onInit = load;
+                ctrl.$onInit = function() {
+                    load();
+                    if (!ddVisibility.isHidden()) {
+                        startTimer();
+                        scheduleMidnightRefresh();
+                    }
+                };
             }]
         };
     }]);

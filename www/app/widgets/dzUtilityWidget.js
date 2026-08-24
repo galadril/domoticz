@@ -14,10 +14,33 @@ define(['app', 'widgets/dzBar'], function (app) {
             $(dialogId + ' #deviceunit').text(device.Unit);
             $(dialogId + ' #devicename').val(device.Name);
             $(dialogId + ' #devicedescription').val(device.Description);
+            var $iconRow = $(dialogId + ' #combosensoricon').closest('tr');
             if (isText) {
                 $(dialogId + ' #devicetext').val(device.Data);
+                showIcon = (device.ShowIcon !== '0');
+                $(dialogId + ' #deviceshowicon').prop('checked', showIcon);
+                $(dialogId + ' #deviceshowicon').off('change').on('change', function () {
+                    if ($(this).is(':checked')) {
+                        $iconRow.show();
+                        if (!$(dialogId + ' #combosensoricon').data('ddslick')) {
+                            $(dialogId + ' #combosensoricon').ddslick({
+                                data: $.ddData,
+                                width: 260,
+                                height: 490,
+                                selectText: "Sensor Icon",
+                                imagePosition: "left"
+                            });
+                            $.each($.ddData, function (i, item) {
+                                if (item.value == device.CustomImage) {
+                                    $(dialogId + ' #combosensoricon').ddslick('select', { index: i });
+                                }
+                            });
+                        }
+                    } else {
+                        $iconRow.hide();
+                    }
+                });
             }
-            var $iconRow = $(dialogId + ' #combosensoricon').closest('tr');
             if (showIcon) {
                 $iconRow.show();
                 $(dialogId + ' #combosensoricon').ddslick({
@@ -37,6 +60,7 @@ define(['app', 'widgets/dzBar'], function (app) {
                 $iconRow.hide();
             }
             if (!isText) {
+                $(dialogId).data('dzShowIcon', showIcon).data('dzShowBar', showBar);
                 var $utilForm = $(dialogId + ' form');
                 $utilForm.find('.dz-bar-btn').remove();
                 if (showBar) {
@@ -44,6 +68,8 @@ define(['app', 'widgets/dzBar'], function (app) {
                     // weather/temperature which use a keyed object via loadForKey/getFullColorJson).
                     dzBarService.setColorJson(device.Color || '');
                     dzBarService.attachBarButton($utilForm, device.idx, device.Name);
+                } else {
+                    dzBarService.setColorJson('');
                 }
             }
             $(dialogId).i18n().dialog('open');
@@ -243,7 +269,7 @@ define(['app', 'widgets/dzBar'], function (app) {
         }
 
         function openDialog(device) {
-            if (typeof device.Counter !== 'undefined') {
+            if (typeof device.Counter !== 'undefined' || device.SubType === 'kWh' || device.Type === 'Energy') {
                 if (device.Type === 'P1 Smart Meter') {
                     openUtilityDialog(device);
                 } else {
@@ -356,8 +382,14 @@ define(['app', 'widgets/dzBar'], function (app) {
                     ctrl.barRanges = ctrl.getBarRanges();
                     if (!ctrl.barRanges.length) { ctrl.barNumVal = undefined; return; }
                     var dataStr;
-                    if (device.Type === 'P1 Smart Meter') {
-                        dataStr = (parseInt(device.UsageDeliv) > 0 ? device.UsageDeliv : device.Usage) || '';
+                    if (device.Type === 'P1 Smart Meter' && device.SubType !== 'Gas') {
+                        var usageVal  = parseFloat((device.Usage      || '').replace(',', '.'));
+                        var delivVal  = parseFloat((device.UsageDeliv || '').replace(',', '.'));
+                        if (!isNaN(usageVal) && !isNaN(delivVal)) {
+                            ctrl.barNumVal = usageVal - delivVal;
+                            return;
+                        }
+                        dataStr = device.Usage || '';
                     } else if (device.SubType === 'kWh' || device.Type === 'Energy' || device.Type === 'Power' || device.Type === 'Current/Energy') {
                         dataStr = device.Usage || '';
                     } else if (device.SubType === 'Gas' || device.SubType === 'RFXMeter counter' || device.SubType === 'Counter Incremental') {
@@ -430,6 +462,10 @@ define(['app', 'widgets/dzBar'], function (app) {
                     return device.SubType === 'Text';
                 };
 
+                ctrl.hideTextIcon = function () {
+                    return device.ShowIcon === '0';
+                };
+
                 ctrl.isAlert = function () {
                     return device.SubType === 'Alert';
                 };
@@ -477,6 +513,8 @@ define(['app', 'widgets/dzBar'], function (app) {
                         bigtext = device.Data + '\u00B0 ' + $scope.$parent.config.TempSign;
                     } else if (ctrl.isThermostatMode() || ctrl.isThermostatFanMode() || ctrl.isThermostatOperatingState()) {
                         bigtext = device.Data;
+                    } else if (typeof device.Rain !== 'undefined') {
+                        bigtext = device.Rain + ' mm';
                     } else if (typeof device.Direction !== 'undefined') {
                         var windSign = ($.myglobals && $.myglobals.windsign) ? $.myglobals.windsign : 'm/s';
                         bigtext = device.DirectionStr || '';
@@ -517,6 +555,8 @@ define(['app', 'widgets/dzBar'], function (app) {
                         return scopedDeviceHtml(device.Data, 'dz-uw-');
                     } else if (ctrl.isAlert()) {
                         return scopedDeviceHtml(device.Data, 'dz-ua-');
+                    } else if (typeof device.Rain !== 'undefined' && typeof device.RainRate !== 'undefined') {
+                        status = $.t('Rain rate') + ': ' + device.RainRate + ' mm/h';
                     } else if (typeof device.Direction !== 'undefined') {
                         var windSign = ($.myglobals && $.myglobals.windsign) ? $.myglobals.windsign : 'm/s';
                         var tempSign = ($rootScope.config && $rootScope.config.TempSign) ? $rootScope.config.TempSign : 'C';

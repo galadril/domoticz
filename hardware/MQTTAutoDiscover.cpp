@@ -53,6 +53,26 @@ enum SwitchCommands {
 #define CLIMATE_HIGH_TEMP_SETPOINT_UNIT 2
 #define CLIMATE_LOW_TEMP_SETPOINT_UNIT 3
 
+// Some devices send booleans as quoted strings ("true"/"false"/"1"/"0").
+// jsoncpp's asBool() throws on those, so handle both forms here.
+static bool JSonGetBool(const Json::Value& value, const bool bDefaultValue)
+{
+	if (value.isBool())
+		return value.asBool();
+	if (value.isNumeric())
+		return (value.asDouble() != 0);
+	if (value.isString())
+	{
+		std::string szValue = value.asString();
+		stdlower(szValue);
+		if ((szValue == "true") || (szValue == "1") || (szValue == "on") || (szValue == "yes"))
+			return true;
+		if ((szValue == "false") || (szValue == "0") || (szValue == "off") || (szValue == "no"))
+			return false;
+	}
+	return bDefaultValue;
+}
+
 
 MQTTAutoDiscover::MQTTAutoDiscover(const int ID, const std::string& Name, const std::string& IPAddress, const unsigned short usIPPort, const std::string& Username, const std::string& Password,
 	const std::string& CAfilenameExtra, const int TLS_Version)
@@ -169,15 +189,26 @@ void MQTTAutoDiscover::CleanValueTemplate(std::string& szValueTemplate)
 	if (
 		(szValueTemplate.find("% if value_json.") == 0)
 		|| (szValueTemplate.find("%if value_json.") == 0)
+		|| (szValueTemplate.find("% if value_json[") == 0)
+		|| (szValueTemplate.find("%if value_json[") == 0)
 		)
 	{
-		szValueTemplate = szValueTemplate.substr(szValueTemplate.find("value_json."));
+		szValueTemplate = szValueTemplate.substr(szValueTemplate.find("value_json"));
 		szValueTemplate = szValueTemplate.substr(0, szValueTemplate.find(" "));
+	}
+	else if (
+		(szValueTemplate.find(" in [") != std::string::npos)
+		&& (szValueTemplate.find(" else ") != std::string::npos)
+		)
+	{
+		//Inline membership conditional, like: value_json[fan_mode] if value_json[fan_mode] in [auto] else None
+		//Keep it intact, GetValueFromTemplate knows how to evaluate this
 	}
 	else
 	{
 		//still needed?
 		szValueTemplate = szValueTemplate.substr(0, szValueTemplate.find("if value_json."));
+		szValueTemplate = szValueTemplate.substr(0, szValueTemplate.find("if value_json["));
 	}
 
 	stdstring_trim(szValueTemplate);
@@ -251,6 +282,57 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 	try
 	{
 		size_t pos;
+
+		//Inline membership conditional, like: value_json[fan_mode] if value_json[fan_mode] in [auto] else None
+		pos = szValueTemplate.find(" if ");
+		if (pos != std::string::npos)
+		{
+			std::string szCondition = szValueTemplate.substr(pos + 4);
+			std::string szElse;
+
+			size_t elsePos = szCondition.find(" else ");
+			if (elsePos != std::string::npos)
+			{
+				szElse = szCondition.substr(elsePos + 6);
+				szCondition = szCondition.substr(0, elsePos);
+				stdstring_trim(szElse);
+			}
+			size_t inPos = szCondition.find(" in [");
+			if (inPos != std::string::npos)
+			{
+				std::string szAllowed = szCondition.substr(inPos + 5);
+				szAllowed = szAllowed.substr(0, szAllowed.find(']'));
+				szCondition = szCondition.substr(0, inPos);
+				stdstring_trim(szCondition);
+
+				std::string szActual = GetValueFromTemplate(root, szCondition, isNull);
+
+				bool bIsAllowed = false;
+				std::vector<std::string> allowed;
+				StringSplit(szAllowed, ",", allowed);
+				for (auto itt : allowed)
+				{
+					stdstring_trim(itt);
+					if (itt == szActual)
+					{
+						bIsAllowed = true;
+						break;
+					}
+				}
+				if (!bIsAllowed)
+				{
+					if (szElse.empty() || szElse == "None")
+					{
+						isNull = true; //there is no value, this is not an error
+						return "";
+					}
+					return szElse;
+				}
+				szValueTemplate = szValueTemplate.substr(0, pos);
+				stdstring_trim(szValueTemplate);
+			}
+		}
+
 		std::map<std::string, std::string> value_options_;
 		pos = szValueTemplate.find("[value_json");
 		if (pos != std::string::npos)
@@ -282,6 +364,8 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 
 				if (szKey.find('[') == std::string::npos)
 				{
+					if (!root.isObject())
+						return ""; //we can only look up keys in an object
 					if (!root.isMember(szKey))
 					{
 						return ""; //key not found!
@@ -306,6 +390,8 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 
 					szKey = szKey.substr(0, szKey.find('['));
 					int iIndex = std::stoi(szIndex);
+					if (!(root.isObject() || root.isArray()))
+						return ""; //we can only look up keys in an object/array
 					if (root[szKey].empty())
 						return ""; //key not found!
 
@@ -324,6 +410,8 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 					{
 						//Not an array, we need a field value
 						root = root[szKey];
+						if (!root.isObject())
+							return ""; //we can only look up keys in an object
 						if (!root.isMember(szIndex))
 						{
 							return ""; //key not found!
@@ -337,7 +425,7 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 					}
 				}
 			}
-			if (root.isObject())
+			if (root.isObject() || root.isArray())
 				return "";
 			std::string retVal;
 			if (root.isDouble())
@@ -392,17 +480,35 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 				}
 				else
 				{
-					if (root[szKey].empty())
+					if (!root.isObject())
+						return ""; //we can only look up keys in an object
+					if (!root.isMember(szKey))
+					{
 						return ""; //key not found!
+					}
+					if (root[szKey].isNull())
+					{
+						isNull = true;
+						return ""; //key not found!
+					}
 					root = root[szKey];
 				}
 			}
 			if (suffix.empty())
-				return root.asString();
+			{
+				if (root.isObject() || root.isArray())
+					return ""; //we don't support arrays as return value, probably a configuration issue
+				else
+					return root.asString();
+			}
 			else
 			{
+				if (!root.isObject())
+					return ""; //we can only look up keys in an object
 				if (root[suffix].empty())
 					return ""; //not found
+				if (root[suffix].isObject() || root[suffix].isArray())
+					return ""; //we don't support arrays as return value, probably a configuration issue
 				return root[suffix].asString();
 			}
 			return "";
@@ -419,8 +525,14 @@ std::string MQTTAutoDiscover::GetValueFromTemplate(Json::Value root, std::string
 				szKey = szValueTemplate;
 		}
 		stdstring_trim(szKey);
+		if (!root.isObject())
+			return ""; //we can only look up keys in an object
 		if (!root[szKey].empty())
+		{
+			if (root[szKey].isObject() || root[szKey].isArray())
+				return ""; //we don't support arrays as return value, probably a configuration issue
 			return root[szKey].asString();
+		}
 	}
 	catch (const std::exception& e)
 	{
@@ -525,15 +637,18 @@ void MQTTAutoDiscover::FixCommandTopic(std::string& command_topic, std::string& 
 // Function to parse and process the template string
 bool MQTTAutoDiscover::parseMapTemplate(const std::string& templateStr, std::vector<std::tuple<std::string, std::string>>& valuesMap, std::string& szKey)
 {
-	// Define a regex pattern to match the dictionary in the template string
-	std::regex dictPattern(R"(\{\% set values.*?=.*?\{(.*?)\} %\})");
+	// Define a regex pattern to match a "{% set <name> = {...} %}" dictionary assignment, name is not fixed
+	std::regex dictPattern(R"(\{\%\s*set\s+([A-Za-z_]\w*)\s*=\s*\{(.*?)\}\s*%\})");
 	std::smatch matches;
 
 	valuesMap.clear();
 
 	std::string dictString;
-	if (std::regex_search(templateStr, matches, dictPattern)) {
-		dictString = matches[1].str();
+	std::string dictName;
+	bool bHaveNamedDict = std::regex_search(templateStr, matches, dictPattern);
+	if (bHaveNamedDict) {
+		dictName = matches[1].str();
+		dictString = matches[2].str();
 	}
 	else {
 		std::vector<std::string> strarray;
@@ -591,14 +706,45 @@ bool MQTTAutoDiscover::parseMapTemplate(const std::string& templateStr, std::vec
 
 	if (!szKey.empty())
 		return true;
-	// Extract the placeholder in the template string
-	std::regex placeholderPattern(R"(\{\{.*?values\[(.*?)\].*?\}\})");
-	if (std::regex_search(templateStr, matches, placeholderPattern)) {
-		szKey = matches[1].str();
-		szKey.erase(0, szKey.find_first_not_of(" \t\r\n'\""));
-		szKey.erase(szKey.find_last_not_of(" \t\r\n'\"") + 1);
+
+	// Extract the placeholder in the template string, using the captured dictionary name (default to "values" for backward compatibility)
+	std::string szDictName = bHaveNamedDict ? dictName : "values";
+	std::regex placeholderPattern("\\{\\{.*?" + szDictName + "\\[(.*?)\\].*?\\}\\}");
+	if (!std::regex_search(templateStr, matches, placeholderPattern)) {
+		szKey.clear();
+		return false;
+	}
+
+	std::string szIndex = matches[1].str();
+	szIndex.erase(0, szIndex.find_first_not_of(" \t\r\n'\""));
+	szIndex.erase(szIndex.find_last_not_of(" \t\r\n'\"") + 1);
+
+	if (szIndex.find("value_json.") != std::string::npos)
+	{
+		szKey = szIndex;
 		return true;
 	}
+
+	// The placeholder index is not a direct value_json reference, it could be an alias
+	// defined earlier in the template, for example: {% set stringifiedValue = value_json.mode | string %}
+	std::regex identifierPattern(R"(^[A-Za-z_]\w*$)");
+	if (std::regex_match(szIndex, identifierPattern))
+	{
+		std::regex aliasPattern("\\{\\%\\s*set\\s+" + szIndex + "\\s*=\\s*(.*?)\\s*%\\}");
+		std::smatch aliasMatches;
+		if (std::regex_search(templateStr, aliasMatches, aliasPattern))
+		{
+			std::string szExpr = aliasMatches[1].str();
+			szExpr = szExpr.substr(0, szExpr.find('|'));
+			stdstring_trim(szExpr);
+			if (szExpr.find("value_json.") != std::string::npos)
+			{
+				szKey = szExpr;
+				return true;
+			}
+		}
+	}
+
 	szKey.clear();
 	return false;
 }
@@ -939,7 +1085,12 @@ void MQTTAutoDiscover::on_auto_discovery_message(const struct mosquitto_message*
 		pSensor->name = sensor_name;
 
 		if (!root["enabled_by_default"].empty())
-			pSensor->bEnabled_by_default = root["enabled_by_default"].asBool();
+			pSensor->bEnabled_by_default = JSonGetBool(root["enabled_by_default"], true);
+
+		if (!root["force_update"].empty())
+			pSensor->bForce_update = JSonGetBool(root["force_update"], false);
+		else if (!root["frc_upd"].empty())
+			pSensor->bForce_update = JSonGetBool(root["frc_upd"], false);
 
 		if (!root["availability_topic"].empty())
 			pSensor->availability_topic = root["availability_topic"].asString();
@@ -1059,6 +1210,15 @@ void MQTTAutoDiscover::on_auto_discovery_message(const struct mosquitto_message*
 			pSensor->value_template = root["value_template"].asString();
 		else if (!root["val_tpl"].empty())
 			pSensor->value_template = root["val_tpl"].asString();
+		//Special case for Select value_template that maps a raw wire value to a human readable option
+		if ((pSensor->component_type == "select") && (!pSensor->value_template.empty()))
+		{
+			std::string szMappedKey;
+			if (parseMapTemplate(pSensor->value_template, pSensor->select_value_map, szMappedKey))
+				pSensor->value_template = szMappedKey;
+			else
+				pSensor->select_value_map.clear();
+		}
 		CleanValueTemplate(pSensor->value_template);
 
 		if (!root["state_value_template"].empty())
@@ -1081,6 +1241,11 @@ void MQTTAutoDiscover::on_auto_discovery_message(const struct mosquitto_message*
 			pSensor->device_class = root["device_class"].asString();
 		else if (!root["dev_cla"].empty())
 			pSensor->device_class = root["dev_cla"].asString();
+
+		if (!root["entity_category"].empty())
+			pSensor->entity_category = root["entity_category"].asString();
+		else if (!root["ent_cat"].empty())
+			pSensor->entity_category = root["ent_cat"].asString();
 
 		if (!root["payload_on"].empty())
 			pSensor->payload_on = root["payload_on"].asString();
@@ -1147,7 +1312,7 @@ void MQTTAutoDiscover::on_auto_discovery_message(const struct mosquitto_message*
 			pSensor->position_closed = root["pos_clsd"].asInt();
 
 		else if (!root["optimistic"].empty())
-			pSensor->bIsOptimistic = root["optimistic"].asBool();
+			pSensor->bIsOptimistic = JSonGetBool(root["optimistic"], false);
 
 		if (!root["on_command_type"].empty())
 			pSensor->on_command_type = root["on_command_type"].asString();
@@ -1780,6 +1945,8 @@ void MQTTAutoDiscover::on_auto_discovery_message(const struct mosquitto_message*
 			SubscribeTopic(pSensor->percentage_state_topic, pSensor->qos);
 			SubscribeTopic(pSensor->action_topic, pSensor->qos);
 			SubscribeTopic(pSensor->preset_mode_state_topic, pSensor->qos);
+			SubscribeTopic(pSensor->fan_state_topic, pSensor->qos);
+			SubscribeTopic(pSensor->swing_state_topic, pSensor->qos);
 
 		}
 	}
@@ -1844,6 +2011,8 @@ void MQTTAutoDiscover::handle_auto_discovery_sensor_message(const struct mosquit
 			|| (pSensor->percentage_state_topic == topic)
 			|| (pSensor->preset_mode_state_topic == topic)
 			|| (pSensor->action_topic == topic)
+			|| (pSensor->fan_state_topic == topic)
+			|| (pSensor->swing_state_topic == topic)
 			)
 		{
 			matching_keys.emplace_back(itt.first, MatchType::State);
@@ -1996,7 +2165,10 @@ uint64_t MQTTAutoDiscover::UpdateValueInt(int HardwareID, const char* ID, unsign
 		Log(LOG_NORM, szLogString);
 	}
 	m_mainworker.sOnDeviceReceived(m_HwdID, DeviceRowIdx, devname, nullptr);
-	m_notifications.CheckAndHandleNotification(DeviceRowIdx, m_HwdID, ID, devname, unit, devType, subType, nValue, sValue);
+	//UpdateValue above stores/applies calibration on the raw sValue; the notification check needs the same
+	//calibrated value the device now shows, so look it up the same way CSQLHelper::UpdateValueInt did.
+	std::string sValueCalibrated = m_sql.GetCalibratedValue(HardwareID, ID, unit, devType, subType, sValue);
+	m_notifications.CheckAndHandleNotification(DeviceRowIdx, m_HwdID, ID, devname, unit, devType, subType, nValue, sValueCalibrated);
 	m_mainworker.CheckSceneCode(DeviceRowIdx, devType, subType, nValue, sValue, "MQTT Auto");
 	return DeviceRowIdx;
 }
@@ -2040,9 +2212,6 @@ bool MQTTAutoDiscover::GuessSensorTypeValue(_tMQTTASensor* pSensor, uint8_t& dev
 			szUnit = "text";
 		}
 	}
-
-	float AddjValue = 0.0F;
-	float AddjMulti = 1.0F;
 
 	if (
 		(szUnit == "hpa")
@@ -2378,8 +2547,7 @@ bool MQTTAutoDiscover::GuessSensorTypeValue(_tMQTTASensor* pSensor, uint8_t& dev
 			temp = ConvertToCelsius(temp);
 		}
 
-		m_sql.GetAddjustment(m_HwdID, pSensor->unique_id.c_str(), pSensor->devUnit, devType, subType, AddjValue, AddjMulti);
-		temp += AddjValue;
+		//Calibration (Calibration tab AddjValue) is now applied centrally by CSQLHelper::UpdateValueInt.
 		sValue = std_format("%.2f", temp);
 	}
 	else if (szUnit == "%")
@@ -2616,19 +2784,66 @@ void MQTTAutoDiscover::handle_auto_discovery_battery(_tMQTTASensor* pSensor, con
 	if (is_number(pSensor->last_value))
 	{
 		iLevel = atoi(pSensor->last_value.c_str());
-	} else {
-		//could be a boolean isLow indicator
+	}
+	else
+	{
+		//could be a boolean isLow indicator (dead path for zwave-js-ui, which sends isLow as a binary_sensor)
 		if (pSensor->last_value == "true")
 			iLevel = 0;
 	}
 
+	//Update the in-memory battery level for every sensor of this node, and collect the distinct
+	//DeviceID forms its device rows use (standalone = unique_id, combined temp/hum/baro =
+	//device_identifiers) so all of the node's rows can be updated in a single statement.
+	std::set<std::string> deviceIDs;
 	for (auto& itt : m_discovered_sensors)
 	{
 		_tMQTTASensor* pDevSensor = &itt.second;
 		if (pDevSensor->device_identifiers == pSensor->device_identifiers)
 		{
 			pDevSensor->BatteryLevel = iLevel;
+			deviceIDs.insert(pDevSensor->unique_id);
 		}
+	}
+	deviceIDs.insert(pSensor->device_identifiers);
+
+	//Build a quoted, comma-separated IN() list. DeviceIDs come from the broker, so escape each as
+	//a SQL string literal (double any single quote) before embedding.
+	std::string inList;
+	for (const auto& id : deviceIDs)
+	{
+		if (!inList.empty())
+			inList += ",";
+		inList += "'";
+		for (const char c : id)
+		{
+			if (c == '\'')
+				inList += '\'';
+			inList += c;
+		}
+		inList += "'";
+	}
+
+	//Persist the new battery level to every already-created device row of this node, so all of the
+	//node's devices show the current battery immediately instead of lazily updating only when each
+	//device next emits state. First select just the rows that will actually change (none in steady
+	//state, so this is a cheap indexed no-op), then update them in one statement and refresh the
+	//event system for exactly those rows. We touch BatteryLevel only (never nValue/sValue), so this
+	//does not trigger scenes/scripts.
+	std::vector<std::vector<std::string> > results = m_sql.safe_query(
+		"SELECT ID FROM DeviceStatus WHERE (HardwareID==%d) AND (BatteryLevel<>%d) AND (DeviceID IN (%s))",
+		m_HwdID, iLevel, inList.c_str());
+	if (results.empty())
+		return;
+
+	m_sql.safe_query(
+		"UPDATE DeviceStatus SET BatteryLevel=%d WHERE (HardwareID==%d) AND (BatteryLevel<>%d) AND (DeviceID IN (%s))",
+		iLevel, m_HwdID, iLevel, inList.c_str());
+
+	for (const auto& sd : results)
+	{
+		uint64_t rowID = std::stoull(sd[0]);
+		m_mainworker.m_eventsystem.UpdateBatteryLevel(rowID, (unsigned char)iLevel);
 	}
 }
 
@@ -2732,8 +2947,27 @@ void MQTTAutoDiscover::handle_auto_discovery_sensor(_tMQTTASensor* pSensor, cons
 		|| (pSensor->object_id == "battery_level")
 		)
 	{
+		//A battery diagnostic entity of the node: absorb it into the node's battery level
+		//indicator instead of creating a standalone device
 		handle_auto_discovery_battery(pSensor, message);
 		return;
+	}
+	if (
+		(pSensor->device_class == "battery")
+		&& (pSensor->entity_category == "diagnostic")
+		&& is_number(pSensor->last_value)
+		)
+	{
+		//Also detect a battery percentage by the standard discovery markers, so it is not tied to a
+		//specific object_id naming. Restricted to numeric values; the main dispatch routes only
+		//component_type "sensor" here, so the isLow binary_sensor (which also carries device_class
+		//"battery") is not routed to this percentage path.
+		//entity_category "diagnostic" is what bridges set on the battery entity of a battery powered
+		//node. Without it the sensor is the node's primary state instead: home energy storage systems
+		//(inverters, Zendure, EcoFlow, ...) report their state of charge with device_class "battery"
+		//while running on mains, and that charge level is not a battery level of the node.
+		//Keep the sensor as a standalone device as well, so the node's own charge level stays visible.
+		handle_auto_discovery_battery(pSensor, message);
 	}
 
 	if (
@@ -3121,7 +3355,7 @@ void MQTTAutoDiscover::handle_auto_discovery_fan(_tMQTTASensor* pSensor, const s
 		{
 			bool isNull = false;
 			current_mode = GetValueFromTemplate(root, pSensor->preset_mode_value_template, isNull);
-			if ((pSensor->preset_mode_state_topic == topic) && current_mode.empty())
+			if ((pSensor->preset_mode_state_topic == topic) && current_mode.empty() && !isNull)
 			{
 				Log(LOG_ERROR, "Climate device no idea how to interpret preset_mode_state value (%s)", pSensor->unique_id.c_str());
 				bValid = false;
@@ -3236,6 +3470,18 @@ void MQTTAutoDiscover::handle_auto_discovery_select(_tMQTTASensor* pSensor, cons
 		{
 			bool isNull = false;
 			current_mode = GetValueFromTemplate(root, pSensor->value_template, isNull);
+			if (!pSensor->select_value_map.empty())
+			{
+				//The raw value received on the wire needs to be translated to the human readable option
+				for (const auto& itt : pSensor->select_value_map)
+				{
+					if (std::get<0>(itt) == current_mode)
+					{
+						current_mode = std::get<1>(itt);
+						break;
+					}
+				}
+			}
 			if ((pSensor->state_topic == topic) && current_mode.empty())
 			{
 				Log(LOG_ERROR, "Select device no idea how to interpret state values (%s)", pSensor->unique_id.c_str());
@@ -4512,11 +4758,8 @@ void MQTTAutoDiscover::handle_auto_discovery_climate(_tMQTTASensor* pSensor, con
 
 			pSensor->nValue = 0;
 
-			float AddjValue = 0.0F;
-			float AddjMulti = 1.0F;
-
-			m_sql.GetAddjustment(m_HwdID, pSensor->unique_id.c_str(), pSensor->devUnit, pSensor->devType, pSensor->subType, AddjValue, AddjMulti);
-			temp_current += AddjValue;
+			//Calibration (Calibration tab AddjValue) is now applied centrally by CSQLHelper::UpdateValueInt,
+			//keyed on the actual row being written below (pTypeTEMP/sTypeSetpoint at CLIMATE_TEMP_SETPOINT_UNIT).
 			pSensor->sValue = std_format("%.1f", temp_current);
 
 			pSensor->subType = sTypeSetpoint;
@@ -4583,7 +4826,7 @@ void MQTTAutoDiscover::handle_auto_discovery_text(_tMQTTASensor* pSensor, const 
 		std::string szIdx = result[0].at(0);
 		std::string devname = result[0].at(1);
 		std::string oldsValue = result[0].at(3);
-		if (oldsValue != pSensor->sValue)
+		if (pSensor->bForce_update || oldsValue != pSensor->sValue)
 		{
 			//Prevent log entry
 			//m_sql.safe_query(
@@ -4670,11 +4913,13 @@ void MQTTAutoDiscover::InsertUpdateSwitch(_tMQTTASensor* pSensor)
 			else if ((pSensor->supported_color_modes.find("rgb") != pSensor->supported_color_modes.end())
 				&& (pSensor->supported_color_modes.find("white") != pSensor->supported_color_modes.end()))
 			{
-				// if RGB and white, check if white contains coldWhite and warmWhite
-				if (
-					(pSensor->color_temp_command_template.find("coldWhite") != std::string::npos)
-					&& (pSensor->color_temp_command_template.find("warmWhite") != std::string::npos)
-					)
+				// Per the HA MQTT Light spec, "white" denotes a single white channel and is
+				// mutually exclusive with "color_temp"; a device with two white channels
+				// advertises "color_temp" (handled below) or "rgbww". Z-Wave JS emits a
+				// coldWhite/warmWhite color_temp_command_template even for single-white
+				// devices, so scanning that template is ambiguous. Treat
+				// supported_color_modes as authoritative.
+				if (bHaveColorTemp)
 				{
 					pSensor->subType = sTypeColor_RGB_CW_WW_Z;
 				}
@@ -5627,8 +5872,12 @@ bool MQTTAutoDiscover::SendSwitchCommand(const std::string& DeviceID, const std:
 
 			bool bCouldUseBrightness = false;
 
+			// ColorModeWhite is meaningful for lights with a white channel (subtypes with a 'W');
+			// the color picker only offers White mode for those, so xy/hs conversions below
+			// see it in pathological cases only (a script sending mode 1 to an xy/hs light)
 			if (color.mode == ColorModeRGB ||
-				color.mode == ColorModeCustom)
+				color.mode == ColorModeCustom ||
+				color.mode == ColorModeWhite)
 			{
 				if (pSensor->supported_color_modes.find("xy") != pSensor->supported_color_modes.end())
 				{
@@ -5678,20 +5927,33 @@ bool MQTTAutoDiscover::SendSwitchCommand(const std::string& DeviceID, const std:
 					root["color"]["g"] = color.g;
 					root["color"]["b"] = color.b;
 				}
+				uint8_t iColdWhite = color.cw;
+				uint8_t iWarmWhite = color.ww;
+				if (color.mode == ColorModeWhite)
+				{
+					// ColorModeWhite has no valid color fields: white fully on, the dim level carries the brightness
+					iColdWhite = 255;
+					iWarmWhite = 255;
+				}
+				else if (pSensor->subType == sTypeColor_RGB_W_Z)
+				{
+					// single white channel: state updates store it in ww, the web UI sets both cw and ww
+					iColdWhite = std::max(color.cw, color.ww);
+				}
 				if (
 					(pSensor->subType == sTypeColor_RGB_W_Z)
 					|| (pSensor->subType == sTypeColor_RGB_CW_WW_Z)
 					|| (pSensor->subType == sTypeColor_RGB_CW_WW)
 					)
 				{
-					root["color"]["c"] = color.cw;
+					root["color"]["c"] = iColdWhite;
 				}
 				if (
 					(pSensor->subType == sTypeColor_RGB_CW_WW_Z)
 					|| (pSensor->subType == sTypeColor_RGB_CW_WW)
 					)
 				{
-					root["color"]["w"] = color.ww;
+					root["color"]["w"] = iWarmWhite;
 				}
 
 				// Check if the rgb_command_template suggests to use "red", "green"... instead of the default "r", "g"... (e.g. Fibaro FGRGBW)
@@ -5716,17 +5978,10 @@ bool MQTTAutoDiscover::SendSwitchCommand(const std::string& DeviceID, const std:
 					}
 					else if (pSensor->subType == sTypeColor_RGB_W_Z)
 					{
-						// only a single 'white'. check if this is warm or coldwhite. 
-						// If not coldwhite it is warmwhite
-						// Single white is stored as coldwhite within Domoticz
-						//if (pSensor->color_temp_command_template.find("coldWhite") != std::string::npos)
-						{
-							colorDef["coldWhite"] = root["color"]["c"];
-						}
-						//if (pSensor->color_temp_command_template.find("warmWhite") != std::string::npos)
-						{
-							colorDef["warmWhite"] = root["color"]["c"];
-						}
+						// single white channel, sent as both warm and cold white;
+						// the gateway (e.g. Z-Wave JS) strips the component the device does not support
+						colorDef["coldWhite"] = root["color"]["c"];
+						colorDef["warmWhite"] = root["color"]["c"];
 					}
 
 					root["value"] = colorDef;
@@ -5862,6 +6117,45 @@ bool MQTTAutoDiscover::SendSwitchCommand(const std::string& DeviceID, const std:
 		{
 			newState = pSensor->select_options.at(iLevel);
 			szCommandTopic = pSensor->command_topic;
+
+			//Some selects need the human readable option translated back to the raw value expected on the wire
+			std::string szRawValue;
+			if (!pSensor->command_template.empty())
+			{
+				std::vector<std::tuple<std::string, std::string>> commandValueMap;
+				std::string szCommandKey;
+				try
+				{
+					parseMapTemplate(pSensor->command_template, commandValueMap, szCommandKey);
+				}
+				catch (const std::exception& e)
+				{
+					Log(LOG_ERROR, "Error parsing command_template for Select device %s! (%s)", pSensor->unique_id.c_str(), e.what());
+					commandValueMap.clear();
+				}
+				for (const auto& itt : commandValueMap)
+				{
+					if (std::get<0>(itt) == newState)
+					{
+						szRawValue = std::get<1>(itt);
+						break;
+					}
+				}
+			}
+			if (szRawValue.empty() && !pSensor->select_value_map.empty())
+			{
+				//No usable command_template mapping, invert the value_template mapping instead
+				for (const auto& itt : pSensor->select_value_map)
+				{
+					if (std::get<1>(itt) == newState)
+					{
+						szRawValue = std::get<0>(itt);
+						break;
+					}
+				}
+			}
+			if (!szRawValue.empty())
+				newState = szRawValue;
 		}
 		if (newState.empty())
 		{

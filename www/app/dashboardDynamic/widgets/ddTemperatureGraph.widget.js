@@ -205,6 +205,7 @@ define([
                             style: { fontSize: '11px', fontWeight: '600', color: getThemeColor('--dz-body-text', '#ccc') }
                         },
                         time: {
+                            useUTC:   false,
                             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
                         },
                         legend:    { enabled: false },
@@ -528,9 +529,13 @@ define([
                     var windowMs  = CHART_TYPE_WINDOW[chartType] || null;
 
                     if (!chart || !windowMs) {
-                        // month/year or chart not yet rendered → debounce a full reload
-                        if (refreshDebounce) { $timeout.cancel(refreshDebounce); }
-                        refreshDebounce = $timeout(load, 60000);
+                        // month/year or chart not yet rendered → throttle full reload to once per 60 s
+                        if (!refreshDebounce) {
+                            refreshDebounce = $timeout(function() {
+                                refreshDebounce = null;
+                                load();
+                            }, 60000);
+                        }
                         return;
                     }
 

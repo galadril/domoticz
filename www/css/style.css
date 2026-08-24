@@ -117,6 +117,18 @@ hr {
 	padding-top: 6px;
 }
 
+/* Device supplied HTML (Text and Alert device values, custom dashboard text) is
+   free form and can be a single unbreakable token, for example a JSON payload.
+   Without this it paints straight out of its card and widens the whole document,
+   which makes a mobile browser zoom the page out to fit. */
+[id^="dz-txt-"],
+[id^="dz-uw-"],
+[id^="dz-um-"],
+[id^="dz-ua-"],
+[id^="dz-dd-"] {
+	overflow-wrap: break-word;
+}
+
 #status pre,
 [id^="dz-txt-"] pre,
 [id^="dz-uw-"] pre,
@@ -737,57 +749,47 @@ body table#itemtable tr > * {
 
 /* Mobile Dashboard items */
 table.mobileitem {
-	*border-collapse: collapse; /* IE7 and lower */
-	border-spacing: 0;
+	border-collapse: separate;
+	border-spacing: 0 2px;
 	border-style: none;
-	background-color: #FFFFFF;
+	background-color: transparent;
 	width: 100%;
 }
 
 .mobileitem {
-	border: solid #ccc 1px;
-	-moz-border-radius: 5px;
-	-webkit-border-radius: 5px;
-	border-radius: 5px;
-	-webkit-box-shadow: 0 1px 1px #ccc;
-	-moz-box-shadow: 0 1px 1px #ccc;
-	box-shadow: 0 1px 1px #ccc;
-	color: #000;
+	border: 1px solid rgba(128,128,128,0.25);
+	border-radius: var(--dz-widget-border-radius, 5px);
+	box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+	color: var(--dz-panel-text);
+	background-color: var(--dz-body-bg);
+	overflow: hidden;
+	margin-bottom: 16px;
 }
 
-.mobileitem tr:hover {
-	background: #fbf8e9;
-	-o-transition: all 0.1s ease-in-out;
-	-webkit-transition: all 0.1s ease-in-out;
-	-moz-transition: all 0.1s ease-in-out;
-	-ms-transition: all 0.1s ease-in-out;
-	transition: all 0.1s ease-in-out;
+.mobileitem tbody tr {
+	background-color: var(--dz-panel-bg);
 }
+
 
 .mobileitem td, .mobileitem th {
-	border-left: 0px solid #ccc;
-	border-top: 1px solid #ccc;
-	padding: 6px;
+	border-left: none;
+	border-top: 1px solid rgba(128,128,128,0.15);
+	padding: 4px;
 	text-align: left;
 }
 
 .mobileitem th {
-	background-color: #dce9f9;
-	background-image: -webkit-gradient(linear, left top, left bottom, from(#ebf3fc), to(#dce9f9));
-	background-image: -webkit-linear-gradient(top, #ebf3fc, #dce9f9);
-	background-image: -moz-linear-gradient(top, #ebf3fc, #dce9f9);
-	background-image: -ms-linear-gradient(top, #ebf3fc, #dce9f9);
-	background-image: -o-linear-gradient(top, #ebf3fc, #dce9f9);
-	background-image: linear-gradient(top, #ebf3fc, #dce9f9);
-	-webkit-box-shadow: 0 1px 0 rgba(255,255,255,.8) inset;
-	-moz-box-shadow: 0 1px 0 rgba(255,255,255,.8) inset;
+	background-color: var(--dz-nav-bg);
+	color: var(--dz-panel-text);
 	border-top: none;
-	text-shadow: 0 1px 0 rgba(255,255,255,.5);
 	font-weight: bold;
+	vertical-align: middle;
 }
 
-.mobileitem td:first-child, .mobileitem th:first-child {
-	border-left: none;
+.mobileitem th > span,
+.mobileitem th > a {
+	display: inline-flex;
+	align-items: center;
 }
 
 .mobileitem td:last-child {
@@ -795,46 +797,33 @@ table.mobileitem {
 	text-align: right;
 }
 
+.mobileitem .log-link {
+	color: var(--dz-widget-accent);
+	margin-right: 4px;
+}
+
 .mobileitem .btn-mini {
 	font-family: Arial,Helvetica,sans-serif;
 	font-size: 10pt;
 	font-weight: bold;
+	background: var(--dz-btn-bg);
+	color: var(--dz-btn-text);
+	border: 1px solid var(--dz-btn-border);
+	border-radius: 4px;
+	text-shadow: none;
+	box-shadow: none;
 }
 
-.mobileitem th:first-child {
-	-moz-border-radius: 5px 0 0 0;
-	-webkit-border-radius: 5px 0 0 0;
-	border-radius: 5px 0 0 0;
+.mobileitem .btn-mini.btn-info {
+	background: var(--dz-btn-info-bg);
+	color: #fff;
+	border-color: var(--dz-btn-info-bg);
 }
 
-.mobileitem th:last-child {
-	-moz-border-radius: 0 5px 0 0;
-	-webkit-border-radius: 0 5px 0 0;
-	border-radius: 0 5px 0 0;
-}
-
-.mobileitem th:only-child {
-	-moz-border-radius: 5px 5px 0 0;
-	-webkit-border-radius: 5px 5px 0 0;
-	border-radius: 5px 5px 0 0;
-}
-
-.mobileitem tr:last-child td:first-child {
-	-moz-border-radius: 0 0 0 5px;
-	-webkit-border-radius: 0 0 0 5px;
-	border-radius: 0 0 0 5px;
-}
-
-.mobileitem tr:last-child td:last-child {
-	-moz-border-radius: 0 0 5px 0;
-	-webkit-border-radius: 0 0 5px 0;
-	border-radius: 0 0 5px 0;
-}
-
-.mobileitem tr:last-child td[colspan="2"] {
-	-moz-border-radius: 0 0 5px 5px;
-	-webkit-border-radius: 0 0 5px 5px;
-	border-radius: 0 0 5px 5px;
+.mobileitem .btn-mini.btn-danger {
+	background: var(--dz-btn-danger-bg);
+	color: #fff;
+	border-color: var(--dz-btn-danger-bg);
 }
 
 .mobileitem #status {
@@ -916,7 +905,7 @@ table.mobileitem {
 }
 
 #holder > .container-fluid {
-	padding-top: 43px;
+	padding-top: var(--navbar-h, 43px);
 	padding-bottom: 20px;
 }
 
@@ -930,6 +919,10 @@ table.mobileitem {
 	.bannercontent {
 		padding-top: 0px;
 	}
+}
+
+.navbar.nav-compact .nav li > a .hidden-tablet {
+	display: none !important;
 }
 
 .brand {
@@ -1080,6 +1073,10 @@ table.mobileitem {
 	background: linear-gradient(135deg, rgba(15, 65, 150, 0.95), rgba(40, 100, 210, 0.9)) !important;
 	border-color: rgba(100, 200, 255, 1.0) !important;
 	box-shadow: 0 0 20px rgba(100, 200, 255, 0.6), inset 0 0 12px rgba(0, 0, 0, 0.35) !important;
+}
+
+.navbar.navbar-inverse {
+	background: #28314c;
 }
 
 .navbar-inverse .navbar-inner {
@@ -1365,6 +1362,9 @@ mark.log-highlight {
 	border-bottom: 1px solid var(--dz-accent-color);
 	font-size: 9pt;
 }
+.page-header-small:first-child {
+	margin-top: 0;
+}
 
 .page-header-with-button {
 	display: flex;
@@ -1427,6 +1427,38 @@ a:link {
 	text-align: right;
 }
 
+/* Report summary strip (Counter / EnergyMultiCounter report headers) */
+.report-summary-strip {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 18px;
+	align-items: flex-start;
+	margin-bottom: 12px;
+	user-select: text;
+}
+.report-stat-item {
+	display: flex;
+	flex-direction: column;
+	min-width: 80px;
+}
+.report-stat-label {
+	font-size: 0.68em;
+	opacity: 0.55;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	line-height: 1.2;
+	margin-bottom: 1px;
+}
+.report-stat-value {
+	font-weight: bold;
+	font-size: 0.9em;
+	line-height: 1.4;
+}
+.report-stat-sub {
+	font-size: 0.78em;
+	opacity: 0.7;
+	line-height: 1.2;
+}
 
 /* Reset */
 
@@ -2206,11 +2238,16 @@ span.evomobile {
 	}
 	#tbFiltRooms SELECT{
 		width: 130px;
+		margin-bottom: 2px;
 	}
 	#tbTimeSun{
 		display: block;
 		width: 100%;
 		text-align: center;
+	}
+	#topBar{
+		line-height: 26px;
+		padding-bottom: 2px;
 	}
 }
 /* mimic the margins done by the (removed when filtering) 'row' Bootstrap Class */
@@ -2261,6 +2298,14 @@ SECTION.dashCategory .liveSearchShown{
 }
 .itemBlock .ui-selectmenu-button{
 	width: 60%;
+}
+/* Selector switch level buttons. Bootstrap's .btn-group is white-space: nowrap,
+   so a selector with many levels kept its buttons on one line and pushed them
+   past the right edge of the viewport, which made the whole page scroll
+   sideways on a phone. Inside a widget card the row wraps instead. */
+.selectorlevelbuttons{
+	max-width: 100%;
+	white-space: normal;
 }
 
 

@@ -72,7 +72,7 @@ namespace Plugins {
 
 		try
 		{
-			PyBorrowedRef pModule = PyState_FindModule(&DomoticzExModuleDef);
+			PyBorrowedRef pModule = CPlugin::FindPyModule("DomoticzEx");
 			if (!pModule)
 			{
 				_log.Log(LOG_ERROR, "(%s) DomoticzEx module not found in interpreter.", __func__);
@@ -202,7 +202,7 @@ namespace Plugins {
 	{
 		if (pObject)
 		{
-			PyBorrowedRef brModule = PyState_FindModule(&DomoticzExModuleDef);
+			PyBorrowedRef brModule = CPlugin::FindPyModule("DomoticzEx");
 			if (brModule)
 			{
 				module_state* pModState = ((struct module_state*)PyModule_GetState(brModule));
@@ -331,7 +331,7 @@ namespace Plugins {
 
 		try
 		{
-			PyBorrowedRef pModule = PyState_FindModule(&DomoticzExModuleDef);
+			PyBorrowedRef pModule = CPlugin::FindPyModule("DomoticzEx");
 			if (!pModule)
 			{
 				_log.Log(LOG_ERROR, "(%s) Domoticz module not found in interpreter.", __func__);
@@ -466,6 +466,11 @@ namespace Plugins {
 
 		if ((pModState->pPlugin) && (pModState->pPlugin->m_HwdID != -1) && (self->Unit != -1))
 		{
+			if (!(CDeviceEx*)self->Parent)
+			{
+				_log.Log(LOG_ERROR, "(%s) Unit is not associated with a Device.", __func__);
+				Py_RETURN_NONE;
+			}
 			CDeviceEx *pDevice = (CDeviceEx*)self->Parent;
 			std::string sDevice = PyBorrowedRef(pDevice->DeviceID);
 			// load associated devices to make them available to python
@@ -525,7 +530,7 @@ namespace Plugins {
 					Py_XDECREF(self->Description);
 					self->Description = PyUnicode_FromString(sd[14].c_str());
 					Py_XDECREF(self->Color);
-					self->Color = PyUnicode_FromString(_tColor(std::string(sd[15])).toJSONString().c_str()); // Parse the color to detect incorrectly formatted color data
+					self->Color = PyUnicode_FromString(NormalizeDeviceColor(sd[15]).c_str());
 					self->Used = atoi(sd[16].c_str());
 					self->Adjustment = static_cast<float>(atof(sd[17].c_str()));
 					self->Multiplier = static_cast<float>(atof(sd[18].c_str()));
@@ -580,7 +585,7 @@ namespace Plugins {
 					if (result.empty())
 					{
 						std::string sValue = PyBorrowedRef(self->sValue);
-						std::string sColor = _tColor(std::string(PyBorrowedRef(self->Color))).toJSONString(); // Parse the color to detect incorrectly formatted color data
+						std::string sColor = NormalizeDeviceColor(std::string(PyBorrowedRef(self->Color)));
 						std::string sLongName = sName;
 						std::string sDescription = PyBorrowedRef(self->Description);
 						std::string sOptionValue = "";
@@ -739,6 +744,11 @@ namespace Plugins {
 				Py_RETURN_NONE;
 			}
 
+			if (!(CDeviceEx*)self->Parent)
+			{
+				_log.Log(LOG_ERROR, "(%s) Unit is not associated with a Device.", __func__);
+				Py_RETURN_NONE;
+			}
 			CDeviceEx *pDevice = (CDeviceEx *)self->Parent;
 			std::string sDeviceID = PyBorrowedRef(pDevice->DeviceID);
 			std::string sID = std::to_string(self->ID);
@@ -748,7 +758,7 @@ namespace Plugins {
 			std::string sDescription = PyBorrowedRef(self->Description);
 			std::string sValue = PyBorrowedRef(self->sValue);
 			std::string sColor = PyBorrowedRef(self->Color);
-			sColor = _tColor(sColor).toJSONString();
+			sColor = NormalizeDeviceColor(sColor);
 			int nValue = self->nValue;
 			int iImage = self->Image;
 			int iBatteryLevel = self->BatteryLevel;
@@ -1077,7 +1087,7 @@ namespace Plugins {
 	{
 		if (pObject)
 		{
-			PyBorrowedRef brModule = PyState_FindModule(&DomoticzExModuleDef);
+			PyBorrowedRef brModule = CPlugin::FindPyModule("DomoticzEx");
 			if (brModule)
 			{
 				module_state* pModState = ((struct module_state*)PyModule_GetState(brModule));

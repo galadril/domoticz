@@ -135,7 +135,7 @@ body.dd-navbar-hidden .dd-topbar {
 
 .dd-topbar .dropdown-menu {
     background: var(--dz-nav-bg, #283750);
-    border-color: rgba(255,255,255,0.15);
+    border-color: var(--dz-border-color, rgba(255,255,255,0.15));
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     max-height: calc(100vh - 100px);
     overflow-y: auto;
@@ -148,8 +148,8 @@ body.dd-navbar-hidden .dd-topbar {
 
 .dd-topbar .dropdown-menu > li > a:hover,
 .dd-topbar .dropdown-menu > li > a:focus {
-    background: rgba(255,255,255,0.1);
-    color: #fff;
+    background: rgba(128,128,128,0.15);
+    color: var(--dz-body-text, #fff);
 }
 
 .dd-topbar .dropdown-menu > li.active > a,
@@ -159,7 +159,7 @@ body.dd-navbar-hidden .dd-topbar {
 }
 
 .dd-topbar .dropdown-menu .divider {
-    background-color: rgba(255,255,255,0.15);
+    background-color: var(--dz-border-color, rgba(255,255,255,0.15));
 }
 
 .dd-topbar .dropdown-menu .dropdown-header {
@@ -177,7 +177,7 @@ body.dd-navbar-hidden .dd-topbar {
     gap: 6px;
     padding: 6px 10px;
     background: var(--dz-nav-bg);
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.1));
     border-radius: 6px;
     flex-wrap: wrap;
     box-shadow: 0 2px 8px rgba(0,0,0,0.2);
@@ -243,7 +243,7 @@ body.dd-navbar-hidden .dd-toolbar {
 /* Toolbar dropdown menu: match the navbar dark theme */
 .dd-toolbar .dropdown-menu {
     background: var(--dz-nav-bg, #283750);
-    border-color: rgba(255,255,255,0.15);
+    border-color: var(--dz-border-color, rgba(255,255,255,0.15));
     box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     max-height: calc(100vh - 100px);
     overflow-y: auto;
@@ -255,8 +255,8 @@ body.dd-navbar-hidden .dd-toolbar {
 
 .dd-toolbar .dropdown-menu > li > a:hover,
 .dd-toolbar .dropdown-menu > li > a:focus {
-    background: rgba(255,255,255,0.1);
-    color: #fff;
+    background: rgba(128,128,128,0.15);
+    color: var(--dz-body-text, #fff);
 }
 
 .dd-toolbar .dropdown-menu > li.active > a,
@@ -266,7 +266,7 @@ body.dd-navbar-hidden .dd-toolbar {
 }
 
 .dd-toolbar .dropdown-menu .divider {
-    background-color: rgba(255,255,255,0.15);
+    background-color: var(--dz-border-color, rgba(255,255,255,0.15));
 }
 
 .dd-toolbar .dropdown-menu .dropdown-header {
@@ -340,8 +340,8 @@ body.dd-navbar-hidden .dd-toolbar {
     width: 320px;
     background: var(--dz-nav-bg);
     color: var(--dz-body-text);
-    border-left: 1px solid rgba(255,255,255,0.08);
-    box-shadow: -4px 0 16px var(--dz-widget-shadow);
+    border-left: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
+    box-shadow: -4px 0 16px var(--dz-widget-shadow, none);
     z-index: 1050;
     display: flex;
     flex-direction: column;
@@ -356,7 +356,7 @@ body.dd-navbar-hidden .dd-toolbar {
 
 .dd-library-panel-header {
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -579,9 +579,9 @@ body.dd-navbar-hidden .dd-toolbar {
     flex-direction: column;
     height: 100%;
     background: var(--dz-panel-bg);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: var(--dz-widget-border-radius);
-    box-shadow: var(--dz-widget-shadow);
+    border: 1px solid var(--dz-border-color, rgba(255, 255, 255, 0.08));
+    border-radius: var(--dz-widget-border-radius, 5px);
+    box-shadow: var(--dz-widget-shadow, none);
     overflow: hidden;
     transition: box-shadow 0.2s;
 }
@@ -599,7 +599,7 @@ body.dd-navbar-hidden .dd-toolbar {
     align-items: center;
     gap: 6px;
     padding: 4px 8px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid var(--dz-border-color, rgba(255, 255, 255, 0.1));
     background: var(--dz-nav-bg);
     color: var(--dz-body-text);
     flex-shrink: 0;
@@ -631,18 +631,18 @@ body.dd-navbar-hidden .dd-toolbar {
 }
 
 .dd-widget-btn.btn {
-    background: rgba(255, 255, 255, 0.12);
-    border-color: rgba(255, 255, 255, 0.3);
-    color: #fff;
+    background: rgba(128, 128, 128, 0.15);
+    border-color: currentColor;
+    color: inherit;
     padding: 2px 6px;
     line-height: 1.4;
 }
 
 .dd-widget-btn.btn:hover,
 .dd-widget-btn.btn:focus {
-    background: rgba(255, 255, 255, 0.28);
-    border-color: rgba(255, 255, 255, 0.55);
-    color: #fff;
+    background: rgba(128, 128, 128, 0.3);
+    border-color: currentColor;
+    color: inherit;
     outline: none;
 }
 
@@ -663,7 +663,7 @@ body.dd-navbar-hidden .dd-toolbar {
 
 .dd-widget-error {
     padding: 12px 16px;
-    color: var(--dz-status-timeout);
+    color: var(--dz-status-timeout, #DF2D3A);
     display: flex;
     align-items: center;
     gap: 6px;
@@ -776,6 +776,18 @@ body.dd-navbar-hidden .dd-toolbar {
     background: transparent;
 }
 .dd-widget--energy-chart .dd-chart-container {
+    inset: 4px;
+    border-radius: var(--dz-border-radius, 8px);
+    background: var(--dz-panel-bg);
+    overflow: hidden;
+}
+.dd-widget--custom-chart > .dd-widget-body {
+    padding: 0;
+    overflow: hidden;
+    position: relative;
+    background: transparent;
+}
+.dd-widget--custom-chart .dd-chart-container {
     inset: 4px;
     border-radius: var(--dz-border-radius, 8px);
     background: var(--dz-panel-bg);
@@ -918,6 +930,20 @@ body.dd-navbar-hidden .dd-toolbar {
     transform-origin: top right;
 }
 
+/* The full-size sun (100px + rotating rays) overflows the small cards —
+   use the mini-sun geometry so its footprint matches the cloud scenes */
+.dd-weather-scene-bg .fcw-rays-main,
+.dd-weather-scene-bg .fcw-rays-main:after,
+.dd-weather-scene-bg .fcw-sun-main {
+    width: 75px;
+    height: 75px;
+}
+.dd-weather-scene-bg .fcw-rays-main,
+.dd-weather-scene-bg .fcw-sun-main {
+    top: 25px;
+    left: 75px;
+}
+
 /* Text content centered vertically */
 .dd-weather-content {
     position: absolute;
@@ -928,12 +954,13 @@ body.dd-navbar-hidden .dd-toolbar {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    z-index: 1;
 }
 
 .dd-weather-temp {
     font-size: 2.2em;
     font-weight: 700;
-    color: var(--dz-body-text);
+    color: var(--dz-widget-accent);
     text-shadow: 0 1px 3px rgba(0,0,0,0.6);
     line-height: 1;
 }
@@ -967,8 +994,27 @@ body.dd-navbar-hidden .dd-toolbar {
 }
 
 .dd-baro-title { position: absolute; top: 8px; left: 8px; z-index: 1; }
-.dd-baro-log-icon { position: absolute; bottom: 8px; right: 8px; opacity: 0.6; }
+.dd-baro-value-link { display: inline-block; text-decoration: none; cursor: pointer; }
+.dd-baro-value-link:hover { text-decoration: none; opacity: 0.85; }
+.dd-baro-log-icon { position: absolute; bottom: 8px; right: 8px; opacity: 0.6; z-index: 1; }
 .dd-baro-log-icon:hover { opacity: 1; }
+
+/* Stat Counter: anchor the sparkline to the card and keep content above it */
+.dd-widget--stat-counter .dd-stat-card { position: relative; }
+.dd-stat-counter-content { position: relative; z-index: 1; }
+
+/* Generic always-on sparkline strip along the bottom of a widget.
+   Reusable by any widget that wants a background trend line; the widget
+   renders a borderless Highcharts areaspline into the container. */
+.dd-widget-spark {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 38%;
+    pointer-events: none;
+    z-index: 0;
+}
 
 /* ── Weather Widget — forecast card style ─────────────────── */
 .dd-weather-forecast-card {
@@ -1116,10 +1162,22 @@ body.dd-navbar-hidden .dd-toolbar {
     margin-left: 0 !important;
 }
 
-/* Energy dashboard: transparent body only (has its own inline padding/layout) */
+/* Energy dashboard: transparent body, tight padding, content centred vertically.
+   The grid snaps to whole rows, so the card row rarely fills the box exactly;
+   centring splits the leftover instead of stacking it all at the bottom. */
 .dd-widget--energy-dashboard > .dd-widget-body {
     background: transparent;
     overflow: hidden;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    /* safe: when the cards are taller than the box, fall back to top-aligned
+       so the first row is never clipped off the top by the centring. */
+    justify-content: safe center;
+}
+.dd-widget--energy-dashboard > .dd-widget-body > div {
+    min-height: 0;
 }
 
 .dd-dz-device {
@@ -1206,33 +1264,61 @@ body.dd-navbar-hidden .dd-toolbar {
     font-size: 0.85em;
 }
 
-/* ── Favorites / Room tab strip ───────────────────────────── */
-.dd-favorites-tabs {
+/* ── Favorites / Room category tab strip ──────────────────── */
+.dd-cat-tabs {
     flex-shrink: 0;
-    margin-bottom: 0;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
-}
-
-.dd-favorites-tabs > li > a {
-    color: var(--dz-body-text);
-    padding: 6px 10px;
-    font-size: 0.82em;
     display: flex;
-    align-items: center;
+    flex-wrap: wrap;
     gap: 4px;
+    padding: 6px 6px 6px;
+    border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
 }
 
-.dd-favorites-tabs > li.active > a,
-.dd-favorites-tabs > li.active > a:hover,
-.dd-favorites-tabs > li.active > a:focus {
-    background: var(--dz-panel-bg);
-    border-color: rgba(255,255,255,0.08);
-    border-bottom-color: var(--dz-panel-bg);
+.dd-cat-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.1));
+    background: transparent;
     color: var(--dz-body-text);
+    font-size: 0.82em;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+    line-height: 1.4;
+    font-family: inherit;
 }
 
-.dd-favorites-tabs > li > a:hover {
+.dd-cat-tab:hover {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.2);
+}
+
+.dd-cat-tab--active {
+    background: rgba(67,164,211,0.18);
+    border-color: var(--dz-widget-accent);
+}
+
+.dd-cat-tab--active:hover {
+    background: rgba(67,164,211,0.28);
+}
+
+.dd-cat-badge {
+    display: inline-block;
     background: rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 0 6px;
+    font-size: 0.85em;
+    line-height: 1.6;
+    min-width: 18px;
+    text-align: center;
+}
+
+.dd-cat-tab--active .dd-cat-badge {
+    background: var(--dz-widget-accent);
+    color: #fff;
 }
 
 /* ── Device tile grid ─────────────────────────────────────── */
@@ -1241,16 +1327,14 @@ body.dd-navbar-hidden .dd-toolbar {
     min-height: 0;
     overflow-y: auto;
     padding: 4px;
-    display: flex;
-    flex-wrap: wrap;
-    align-content: flex-start;
-    align-items: flex-start;
-    gap: 4px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    grid-auto-rows: min-content;
+    align-content: start;
+    gap: 8px 16px;
 }
 
 .dd-dz-fav-item {
-    flex: 0 0 100%;
-    width: 100%;
     min-width: 0;
 }
 
@@ -1326,10 +1410,10 @@ body.dd-navbar-hidden .dd-toolbar {
     overflow: hidden;
     padding: 8px;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     text-align: center;
-    box-sizing: border-box;
     box-sizing: border-box;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1337,17 +1421,31 @@ body.dd-navbar-hidden .dd-toolbar {
     color: var(--dz-body-text);
 }
 
+.dd-text-note-html {
+    display: block;
+    width: 100%;
+    white-space: normal;
+}
 .dd-text-note-hint {
     display: block;
     color: var(--dz-text-muted, #999);
     font-size: 0.8em;
     padding: 4px 0;
 }
+.dd-text-note-divider {
+    height: 2px;
+    width: 100%;
+    margin-top: 6px;
+    border-radius: 1px;
+    background-color: var(--dz-accent-color);
+}
 
 /* ── Activity Log widget ──────────────────────────────────── */
 .dd-activity-log {
     height: 100%;
     overflow-y: auto;
+    border-radius: var(--dz-border-radius, 8px);
+    background: var(--dz-panel-bg);
 }
 
 .dd-activity-list {
@@ -1361,7 +1459,7 @@ body.dd-navbar-hidden .dd-toolbar {
     align-items: center;
     gap: 8px;
     padding: 5px 8px;
-    border-bottom: 1px solid rgba(255,255,255,0.08);
+    border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
 }
 
 .dd-activity-item:last-child {
@@ -1465,7 +1563,7 @@ body.dd-navbar-hidden .dd-toolbar {
 .dd-qa-dimmer-group {
     padding: 8px 6px;
     border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     background: var(--dz-panel-bg);
     font-size: 0.8em;
     color: var(--dz-body-text);
@@ -1563,8 +1661,8 @@ body.dd-navbar-hidden .dd-toolbar {
 
 
 .dd-qa-level-text {
-    font-size: 0.75em;
-    opacity: 0.75;
+    font-size: 1em;
+    color: var(--dz-accent-color);
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1597,8 +1695,8 @@ body.dd-navbar-hidden .dd-toolbar {
 }
 
 .dd-qa-level-btn--active {
-    background: var(--dz-btn-primary-bg);
-    border-color: var(--dz-btn-primary-bg);
+    background: var(--dz-accent-color);
+    border-color: var(--dz-accent-color);
     color: var(--dz-btn-primary-text);
 }
 
@@ -1616,7 +1714,7 @@ body.dd-navbar-hidden .dd-toolbar {
 }
 
 /* Full-width row buttons: switch, scene, selector — excludes blind sub-buttons */
-.dd-quick-actions--list .dd-qa-btn:not(.dd-qa-btn--blind):not(.dd-qa-btn--group):not(.dd-qa-btn--dim-slider):not(.dd-qa-btn--dim-toggle) {
+.dd-quick-actions--list .dd-qa-btn:not(.dd-qa-btn--blind):not(.dd-qa-btn--group):not(.dd-qa-btn--dim-toggle) {
     flex: none;
     width: 100%;
     box-sizing: border-box;
@@ -1641,7 +1739,6 @@ body.dd-navbar-hidden .dd-toolbar {
     order: 2;
     font-size: 1em;
     font-weight: 600;
-    opacity: 1;
 }
 .dd-quick-actions--list .dd-qa-btn:not(.dd-qa-btn--blind) > .dd-qa-status-text {
     order: 3;
@@ -1657,11 +1754,12 @@ body.dd-navbar-hidden .dd-toolbar {
     width: 100%;
     box-sizing: border-box;
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     min-width: 0;
     padding: 6px 10px;
     background: var(--dz-panel-bg);
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     border-radius: 6px;
 }
 
@@ -1671,6 +1769,11 @@ body.dd-navbar-hidden .dd-toolbar {
 
 .dd-quick-actions--list .dd-qa-blind-btns {
     width: auto;
+}
+
+.dd-quick-actions--list .dd-qa-blind-group > .dd-qa-dim-slider-row {
+    flex: 0 0 100%;
+    padding: 4px 0 2px;
 }
 
 .dd-qa-group-group {
@@ -1686,6 +1789,11 @@ body.dd-navbar-hidden .dd-toolbar {
     display: flex;
     gap: 3px;
     flex-shrink: 0;
+}
+
+/* Grid mode: center the On/Off pair below the label, same as the blind group */
+.dd-quick-actions .dd-qa-group-group {
+    align-items: center;
 }
 
 .dd-qa-btn--group {
@@ -1706,7 +1814,7 @@ body.dd-navbar-hidden .dd-toolbar {
     min-width: 0;
     padding: 6px 10px;
     background: var(--dz-panel-bg);
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     border-radius: 6px;
 }
 
@@ -1756,7 +1864,7 @@ body.dd-navbar-hidden .dd-toolbar {
     min-width: 0;
     padding: 6px 10px;
     background: var(--dz-panel-bg);
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     border-radius: 6px;
 }
 
@@ -1794,8 +1902,7 @@ body.dd-navbar-hidden .dd-toolbar {
     text-align: center;
 }
 
-.dd-qa-dimmer-group > .dd-qa-btn--dim-toggle,
-.dd-qa-dimmer-group > .dd-qa-btn--dim-slider {
+.dd-qa-dimmer-group > .dd-qa-btn--dim-toggle {
     order: 1;
 }
 
@@ -1804,7 +1911,6 @@ body.dd-navbar-hidden .dd-toolbar {
     flex: 0 0 100%;
 }
 
-.dd-qa-btn--dim-slider,
 .dd-qa-btn--dim-toggle {
     flex: none;
     min-width: 0;
@@ -1816,19 +1922,16 @@ body.dd-navbar-hidden .dd-toolbar {
     font-size: 1em;
 }
 
-.dd-qa-btn--dim-slider:hover:not(:disabled),
 .dd-qa-btn--dim-toggle:hover:not(:disabled) {
     background: transparent;
     border: none;
 }
 
-.dd-qa-btn--dim-slider.dd-qa-btn--success,
 .dd-qa-btn--dim-toggle.dd-qa-btn--success {
     background: #dff0d8;
     border: 1px solid var(--dz-btn-success-bg, #27ae60);
 }
 
-.dd-qa-btn--dim-slider.dd-qa-btn--error,
 .dd-qa-btn--dim-toggle.dd-qa-btn--error {
     background: #f2dede;
     border: 1px solid var(--dz-btn-danger-bg, #d9534f);
@@ -1839,18 +1942,22 @@ body.dd-navbar-hidden .dd-toolbar {
     align-items: center;
     gap: 8px;
     width: 100%;
+    box-sizing: border-box;
     padding: 4px 2px 2px;
 }
 
+/* min-width: 0 lets the range shrink past the browser's default input width;
+   without it a narrow card pushes the percentage text outside the widget */
 .dd-qa-dim-range-h {
     flex: 1;
+    min-width: 0;
     cursor: pointer;
     accent-color: var(--dz-accent-color);
 }
 
 .dd-qa-dim-value-text {
     font-size: 0.78em;
-    color: var(--dz-widget-stat-muted);
+    color: var(--dz-body-text);
     white-space: nowrap;
     min-width: 30px;
     text-align: right;
@@ -1866,18 +1973,16 @@ body.dd-navbar-hidden .dd-toolbar {
     gap: 0 8px;
     padding: 6px 10px;
     background: var(--dz-panel-bg);
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     border-radius: 6px;
 }
 
 .dd-quick-actions--list .dd-qa-dimmer-group > .dd-qa-btn--dim-toggle {
-    order: 0;
     flex: none;
     padding: 0;
 }
 
 .dd-quick-actions--list .dd-qa-dimmer-group > .dd-qa-label {
-    order: 1;
     flex: 1;
     text-align: left;
     min-width: 0;
@@ -1886,14 +1991,8 @@ body.dd-navbar-hidden .dd-toolbar {
     white-space: nowrap;
 }
 
-.dd-quick-actions--list .dd-qa-dimmer-group > .dd-qa-btn--dim-slider {
-    order: 2;
-    flex: none;
-    padding: 0;
-}
-
 .dd-quick-actions--list .dd-qa-dimmer-group > .dd-qa-dim-slider-row {
-    order: 3;
+    order: 2;
     flex: 0 0 100%;
     padding: 4px 0 2px;
 }
@@ -1932,7 +2031,7 @@ body.dd-navbar-hidden .dd-toolbar {
     text-align: left;
     padding: 6px 10px;
     border-radius: 6px;
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     background: var(--dz-panel-bg);
     box-sizing: border-box;
     gap: 8px;
@@ -2145,7 +2244,7 @@ body.dd-navbar-hidden .dd-toolbar {
 
 /* ── Edit Mode Indicator ─────────────────────────────────────────── */
 .dd-page.edit-mode .dd-toolbar {
-    border-bottom: 2px solid rgba(255,255,255,0.15);
+    border-bottom: 2px solid var(--dz-border-color, rgba(255,255,255,0.15));
 }
 
 .dd-page.edit-mode .dd-widget-chrome {
@@ -2377,6 +2476,11 @@ dd-wcp-color {
     font-size: 0 !important;
 }
 
+.dd-wcp-swatch--auto {
+    border-style: dashed !important;
+    opacity: 0.75;
+}
+
 .dd-wcp-drop {
     position: absolute;
     top: calc(100% + 4px);
@@ -2388,6 +2492,18 @@ dd-wcp-color {
     padding: 8px;
     box-shadow: 1px 1px 6px rgba(0,0,0,.4);
 }
+
+/* Copy-deep-link button next to the editable dashboard title (edit mode only) */
+.dd-title-link-btn {
+    background: transparent;
+    border: 0;
+    padding: 2px 8px;
+    margin-left: 6px;
+    color: var(--dz-text-muted, #888);
+    cursor: pointer;
+    transition: color 0.15s ease;
+}
+.dd-title-link-btn:hover { color: var(--dz-accent-color, #43A4D3); }
 
 /* Range / slider row */
 .dd-settings-form .form-group > div[style*="flex"] {
@@ -2609,6 +2725,20 @@ dd-wcp-color {
 .dd-al-rename-icon { color: var(--dz-input-text); }
 .dd-al-delete-icon { color: var(--dz-accent-red); }
 
+/* Clear/remove button next to an optional device-picker in widget settings */
+.dd-device-clear {
+    flex-shrink: 0;
+    border: none;
+    background: none;
+    padding: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--dz-accent-red);
+    opacity: 0.5;
+    transition: opacity 0.15s;
+}
+.dd-device-clear:hover { opacity: 1; }
+
 
 .dd-al-empty {
     padding: 8px;
@@ -2685,7 +2815,7 @@ dd-wcp-color {
     resize: vertical;
     background: var(--dz-modal-bg, #013) !important;
     color: var(--dz-modal-text, #ddd) !important;
-    border-color: rgba(255,255,255,0.15) !important;
+    border-color: var(--dz-border-color, rgba(255,255,255,0.15)) !important;
 }
 
 .dd-eim-textarea:focus {
@@ -2709,7 +2839,7 @@ dd-wcp-color {
 .dd-eim-dropzone {
     margin-top: 8px;
     padding: 10px 16px;
-    border: 2px dashed rgba(255,255,255,0.2);
+    border: 2px dashed var(--dz-border-color, rgba(255,255,255,0.2));
     border-radius: 4px;
     display: flex;
     align-items: center;
@@ -2788,6 +2918,9 @@ dd-wcp-color {
     box-sizing: border-box;
     overflow: hidden;
     position: relative;
+}
+.dd-stat-card--timeout {
+    background: color-mix(in srgb, var(--dz-status-timeout) 25%, var(--dz-panel-bg));
 }
 .dd-stat-label {
     font-size: 0.85em;
@@ -2871,7 +3004,10 @@ dd-wcp-color {
     gap: 6px;
     justify-content: center;
     align-items: stretch;
-    padding: 2px 0 4px;
+    /* No padding of its own: the widget body supplies it. The bottom padding used to be
+       the only gap to the balance bar, so that moved onto the bar, where it costs height
+       only when the bar is actually there. */
+    padding: 0;
 }
 .dd-fc-conditions .dd-stat-card {
     min-width: 120px;
@@ -2924,6 +3060,12 @@ dd-wcp-color {
     gap: 6px 20px;
     height: 100%;
     box-sizing: border-box;
+}
+/* Only where the bar follows the card row, i.e. inside the Energy Dashboard widget: the
+   row gave up the bottom padding that used to separate the two. The self-sufficiency
+   widget uses .dd-balance as its own root and must not gain a top margin. */
+.dd-fc-conditions + .dd-balance {
+    margin-top: 4px;
 }
 .dd-balance-stats {
     display: flex;
@@ -3007,9 +3149,10 @@ dd-wcp-color {
 /* ── Text Sensor Widget ───────────────────────────────────── */
 .dd-widget--text-sensor > .dd-widget-body { padding: 4px; background: transparent; }
 .dd-text-sensor {
+    display: flex;
+    flex-direction: column;
     padding: 8px;
     height: 100%;
-    overflow-y: auto;
     box-sizing: border-box;
     border-radius: var(--dz-border-radius, 8px);
     background: var(--dz-panel-bg);
@@ -3017,6 +3160,8 @@ dd-wcp-color {
 .dd-text-sensor-inner {
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
 }
 .dd-text-sensor-header {
     display: flex;
@@ -3046,21 +3191,23 @@ dd-wcp-color {
     margin-left: 8px;
 }
 .dd-text-sensor-content {
-    flex-shrink: 0;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     word-break: break-word;
     line-height: 1.5;
     text-align: left;
 }
 
 /* ── RSS Feed Widget ──────────────────────────────────────── */
-.dd-rss { height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 8px; }
+.dd-rss { height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 8px; border-radius: var(--dz-border-radius, 8px); background: var(--dz-panel-bg); }
 .dd-rss-header,
 .dd-log-header,
 .dd-calendar-header,
 .dd-battery-monitor-header { display: flex; justify-content: space-between; align-items: center; }
 .dd-rss-header { font-size: 0.9em; font-weight: 600; color: var(--dz-widget-accent); margin-bottom: 8px; }
 .dd-rss-list { flex: 1; overflow-y: auto; }
-.dd-rss-item { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.08); align-items: flex-start; }
+.dd-rss-item { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.08)); align-items: flex-start; }
 .dd-rss-item:last-child { border-bottom: none; }
 .dd-rss-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
 .dd-rss-item-body { flex: 1; min-width: 0; }
@@ -3088,14 +3235,16 @@ dd-wcp-color {
 .dd-forecast-error { font-size: 0.8em; color: var(--dz-accent-red); margin-top: 8px; }
 
 /* ── Domoticz Log Widget ──────────────────────────────────── */
-.dd-widget--domoticz-log > .dd-widget-body { padding: 0; overflow: hidden; position: relative; }
+.dd-widget--domoticz-log > .dd-widget-body { padding: 0; overflow: hidden; position: relative; background: transparent; }
+.dd-widget--domoticz-log .dd-log { border-radius: var(--dz-border-radius, 8px); background: var(--dz-panel-bg); }
 .dd-log { position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden; }
-.dd-log-header { padding: 4px 8px; flex-shrink: 0; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.dd-log-header { padding: 4px 8px; flex-shrink: 0; border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.1)); }
 .dd-log-title { font-size: 0.9em; font-weight: 600; }
 .dd-log-filters { display: flex; gap: 4px; align-items: center; }
 .dd-log-filter-btn { padding: 2px 6px; border-radius: 4px; border: 1px solid currentColor; background: transparent; cursor: pointer; font-size: 0.75em; opacity: 0.5; }
 .dd-log-filter-btn.active { opacity: 1; background: currentColor; }
 .dd-log-filter-btn.active span { color: var(--dz-body-text); }
+.dd-log-filter-normal.active span { color: var(--dz-body-bg) !important; }
 .dd-log-filter-normal { color: var(--dz-body-text); }
 .dd-log-filter-status { color: var(--dz-widget-accent); }
 .dd-log-filter-error  { color: var(--dz-accent-red); }
@@ -3165,7 +3314,7 @@ dd-wcp-color {
 .dd-calendar-header { font-size: 0.9em; font-weight: 600; margin-bottom: 8px; flex-shrink: 0; }
 .dd-calendar-body { flex: 1; overflow-y: auto; min-height: 0; }
 .dd-calendar-group { margin-bottom: 10px; }
-.dd-calendar-day-label { font-size: 0.75em; font-weight: 700; text-transform: uppercase; color: var(--dz-widget-accent); margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 2px; }
+.dd-calendar-day-label { font-size: 0.75em; font-weight: 700; text-transform: uppercase; color: var(--dz-widget-accent); margin-bottom: 4px; border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.1)); padding-bottom: 2px; }
 .dd-calendar-event { display: flex; gap: 8px; padding: 3px 0; font-size: 0.85em; align-items: baseline; }
 .dd-calendar-time { flex-shrink: 0; min-width: 45px; color: var(--dz-widget-stat-muted); font-size: 0.9em; }
 .dd-calendar-allday { font-style: italic; }
@@ -3183,13 +3332,13 @@ dd-wcp-color {
     border-radius: var(--dz-border-radius, 8px);
     background: var(--dz-panel-bg);
 }
-.dd-battery-monitor { height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 8px; }
+.dd-battery-monitor { height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 8px; border-radius: var(--dz-border-radius, 8px); background: var(--dz-panel-bg); }
 .dd-battery-monitor-header { margin-bottom: 8px; flex-shrink: 0; }
 .dd-battery-monitor-title { font-size: 0.9em; font-weight: 600; }
 .dd-battery-monitor-badge { font-size: 0.75em; padding: 2px 7px; border-radius: 10px; background: var(--dz-accent-red); color: var(--dz-body-text); }
 .dd-battery-monitor-badge.ok { background: var(--dz-widget-energy-export); }
 .dd-battery-monitor-list { flex: 1; min-height: 0; overflow-y: auto; }
-.dd-battery-monitor-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: 0.85em; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.dd-battery-monitor-row { display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: 0.85em; border-bottom: 1px solid var(--dz-border-color, rgba(255,255,255,0.06)); }
 .dd-battery-monitor-row:last-child { border-bottom: none; }
 .dd-battery-monitor-icon { width: 20px; text-align: center; font-size: 1em; flex-shrink: 0; }
 .dd-battery-monitor-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3233,6 +3382,22 @@ body.dd-standby::after {
 .dd-gauge-text-link:hover { fill: var(--dz-accent-color); opacity: 1; }
 .dd-gauge-title { margin-bottom: 4px; }
 .dd-gauge-temp-sub-txt { font-size: 6px; fill: var(--dz-body-text); opacity: 0.70; }
+.dd-gauge-alert-text {
+    position: absolute;
+    left: 50%;
+    top: 62%;
+    transform: translate(-50%, -50%);
+    width: 66%;
+    max-height: 60%;
+    overflow: hidden;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.2;
+    color: var(--dz-body-text);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    pointer-events: none;
+}
 
 /* ── Dial widget ──────────────────────────────────────────── */
 
@@ -3251,7 +3416,7 @@ body.dd-standby::after {
 /* Scoped tokens so dark face/bezel colours are defined once */
 .dd-dial-outer {
     --dd-bezel-fill: var(--dz-panel-bg);
-    --dd-face-fill:  var(--dz-panel-bg-dark);
+    --dd-face-fill:  var(--dz-panel-bg-dark, rgba(0, 0, 0, 0.75));
 
     flex: 1; min-height: 0; min-width: 0; width: 100%; overflow: hidden;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -3277,6 +3442,7 @@ body.dd-standby::after {
 .dd-dial-highlight { fill: rgba(255,255,255,0.06); pointer-events: none; }
 .dd-dial-face      { fill: var(--dd-face-fill); }
 .dd-dial-ring      { transition: stroke 0.4s ease; }
+.dd-dial-timeout   { opacity: 0.85; }
 .dd-dial-tick      { stroke: rgba(255,255,255,0.28); stroke-width: 0.8; stroke-linecap: round; }
 .dd-dial-tick-minor{ stroke: rgba(255,255,255,0.14); stroke-width: 0.5; stroke-linecap: round; }
 .dd-dial-scale-lbl { font-size: 5px; fill: var(--dz-widget-stat-muted); font-family: inherit; }
@@ -3301,9 +3467,27 @@ body.dd-standby::after {
 .dd-dial-sel-active-box { transition: fill 0.2s, stroke 0.2s; }
 .dd-dial-sel-item   { fill: var(--dz-body-text); font-family: inherit; transition: opacity 0.15s; }
 .dd-dial-sel-active { fill: var(--dz-widget-amber) !important; font-weight: 700; }
-/* Cursor hints for drag-to-set */
-.dd-dial-interactive { cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; }
-.dd-dial-dragging    { cursor: grabbing; }
+/* Cursor hints for drag-to-set.
+   The dial's SVG layers are concentric, so element-scoped cursors track the
+   click radius exactly: default outside the bezel, grab on the ring band,
+   pointer on the inner hub (setpoint opens the value-entry popup there). */
+.dd-dial-interactive { cursor: default; user-select: none; -webkit-user-select: none; touch-action: none; }
+.dd-dial-interactive .dd-dial-bezel,
+.dd-dial-interactive .dd-dial-face,
+.dd-dial-interactive .dd-dial-ring,
+.dd-dial-interactive .dd-dial-needle,
+.dd-dial-interactive .dd-dial-tick,
+.dd-dial-interactive .dd-dial-tick-minor,
+.dd-dial-interactive .dd-dial-scale-lbl,
+.dd-dial-interactive .dd-dial-arc-track,
+.dd-dial-interactive .dd-dial-arc-fill { cursor: grab; }
+.dd-dial-setpoint .dd-dial-hub,
+.dd-dial-setpoint .dd-dial-value-txt,
+.dd-dial-setpoint .dd-dial-unit-txt { cursor: pointer; }
+.dd-dial-selector .dd-dial-hub,
+.dd-dial-selector .dd-dial-sel-item,
+.dd-dial-selector .dd-dial-sel-active-box { cursor: grab; }
+.dd-dial-dragging, .dd-dial-dragging * { cursor: grabbing !important; }
 .dd-dial-clickable   { cursor: pointer; user-select: none; -webkit-user-select: none; }
 .dd-dial-clickable:hover { opacity: 0.8; }
 
@@ -3336,7 +3520,7 @@ body.dd-standby::after {
     gap: 2px;
     padding: 6px 8px;
     background: var(--dz-panel-bg);
-    border: 1px solid rgba(255,255,255,0.08);
+    border: 1px solid var(--dz-border-color, rgba(255,255,255,0.08));
     border-radius: 6px;
     text-align: center;
     cursor: default;
@@ -3360,6 +3544,10 @@ body.dd-standby::after {
 .dd-qs-item--on i {
     color: var(--dz-accent-color);
     opacity: 1;
+}
+.dd-qs-item--timeout {
+    background: color-mix(in srgb, var(--dz-status-timeout) 25%, var(--dz-panel-bg));
+    border-color: var(--dz-status-timeout);
 }
 .dd-log-icon {
     cursor: pointer;
@@ -3430,3 +3618,13 @@ body.dd-standby::after {
 .dd-list-font--larger { font-size: 1.1em; }
 .dd-list-font--large  { font-size: 1.25em; }
 .dd-list-font--xl     { font-size: 1.5em; }
+
+/* Mobile favorites: active-state highlight for the "Off"/closed button.
+   Uses the same blue as the "On" button so the highlight always marks the
+   current state (on or off) — the long-standing, familiar Domoticz look. */
+.mobileitem .btn.btn-off-active {
+    background: var(--dz-btn-info-bg);
+    color: #fff;
+    border-color: var(--dz-btn-info-bg);
+    font-weight: bold;
+}

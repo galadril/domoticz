@@ -31,9 +31,21 @@ void CDomoticzHardwareBase::GetManualSwitchParameters(const std::multimap<std::s
 
 bool CDomoticzHardwareBase::Start()
 {
+	// Guard against a duplicate/concurrent Start() on an already-started instance.
+	// StartHardware() reassigns the worker thread; doing so while the previous
+	// std::thread is still joinable destroys it and calls std::terminate().
+	// The atomic exchange makes the check-and-set race-safe between the web API
+	// (Cmd_AddHardware) and the MainWorker (StartDomoticzHardware) threads.
+	if (m_bIsStarted.exchange(true))
+		return true;
+
 	m_iHBCounter = 0;
-	m_bIsStarted = StartHardware();
-	return m_bIsStarted;
+	if (!StartHardware())
+	{
+		m_bIsStarted = false;
+		return false;
+	}
+	return true;
 }
 
 bool CDomoticzHardwareBase::Stop()
@@ -324,6 +336,7 @@ void CDomoticzHardwareBase::SendThermostatSensor(const uint8_t ID1, const uint8_
 	thermostat.setpoint = setpointValue;
 	thermostat.temperature = temperatureValue;
 	thermostat.battery_level = BatteryLevel;
+	thermostat.update_flags = 0x03; // temp + setpoint
 	sDecodeRXMessage(this, (const unsigned char*)&thermostat, defaultname.c_str(), -1, nullptr);
 }
 
@@ -341,6 +354,7 @@ void CDomoticzHardwareBase::SendThermostatSensor(const uint8_t ID1, const uint8_
 	thermostat.humidity = static_cast<uint8_t>(humidityValue);
 	thermostat.humidity_status = Get_Humidity_Level(thermostat.humidity);
 	thermostat.battery_level = BatteryLevel;
+	thermostat.update_flags = 0x07; // temp + setpoint + humidity
 	sDecodeRXMessage(this, (const unsigned char*)&thermostat, defaultname.c_str(), -1, nullptr);
 }
 
@@ -374,6 +388,7 @@ void CDomoticzHardwareBase::SendThermostatSensor(const uint8_t ID1, const uint8_
 
 	thermostat.forecast = barometric_forecast;
 	thermostat.battery_level = BatteryLevel;
+	thermostat.update_flags = 0x0F; // temp + setpoint + humidity + barometer
 	sDecodeRXMessage(this, (const unsigned char*)&thermostat, defaultname.c_str(), -1, nullptr);
 }
 
@@ -1148,7 +1163,7 @@ void CDomoticzHardwareBase::SendSelectorSwitch(const int NodeID, const uint8_t C
 		//Check Level (sValue in SQL Query)
 		if (xcmd.level == std::stoi(result[0][1]))
 			return; // no need to uodate
-		result = m_sql.safe_query("UPDATE DeviceStatus SET sValue=%i WHERE (HardwareID==%d) AND (DeviceID=='%08X')", xcmd.level, m_HwdID, NodeID);
+		result = m_sql.safe_query("UPDATE DeviceStatus SET sValue=%i WHERE (HardwareID==%d) AND (DeviceID=='%08X') AND (Unit == '%d')", xcmd.level, m_HwdID, NodeID, xcmd.unitcode);
 	}
 }
                             

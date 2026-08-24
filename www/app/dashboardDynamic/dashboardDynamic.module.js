@@ -105,6 +105,13 @@ define(['app'], function(app) {
 
         function extractDeviceValue(d) {
             var type = (d.Type || '').toLowerCase();
+            if (d.SwitchType === 'Selector') {
+                var levelNames = [];
+                try { levelNames = b64DecodeUnicode(d.LevelNames).split('|'); } catch(e) { levelNames = (d.LevelNames || '').split('|'); }
+                var levelIdx  = (d.LevelInt !== undefined) ? Math.round(d.LevelInt / 10) : 0;
+                var levelName = levelNames[levelIdx] || d.Status || d.Data || '—';
+                return { value: levelName, isOn: d.LevelInt > 0, unit: '', unit2: null, secondValue: null, typeClass: 'switch' };
+            }
             if (d.SwitchType !== undefined || type.indexOf('light') >= 0 || type.indexOf('switch') >= 0) {
                 var statusStr = d.Status || d.Data || '';
                 var isOn = (d.SwitchType === 'Dimmer')
@@ -131,6 +138,11 @@ define(['app'], function(app) {
             }
             if (d.Humidity !== undefined) {
                 return { value: String(d.Humidity), isOn: false, unit: '%', unit2: null, secondValue: null, typeClass: 'humidity' };
+            }
+            if (d.Rain !== undefined) {
+                return { value: String(d.Rain), isOn: false, unit: 'mm',
+                         unit2: d.RainRate !== undefined ? 'mm/h' : null,
+                         secondValue: d.RainRate !== undefined ? String(d.RainRate) : null, typeClass: 'generic' };
             }
             // P1 Smart Meter — has both CounterToday (import) and CounterDelivToday (export)
             if (d.CounterToday !== undefined && d.CounterDelivToday !== undefined) {

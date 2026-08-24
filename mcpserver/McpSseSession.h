@@ -15,6 +15,7 @@ struct CMcpSession
 {
 	std::string sessionId;
 	http::server::WebEmSession webSession;
+	http::server::_eUserRights rights = http::server::URIGHTS_NONE;
 	time_t createdAt;
 	time_t lastActivity;
 
@@ -65,5 +66,7 @@ private:
 	http::server::WebEmSession m_webSession;
 	std::string m_mcpSessionId;
 	std::string m_lastEventId;
+	bool m_isLegacy = false;
+	std::string m_legacyEndpointUrl;
 	std::atomic<bool> m_alive{ true };
 };

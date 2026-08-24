@@ -49,10 +49,18 @@ ENDIF()
 option(USE_PRECOMPILED_HEADER "Use precompiled header feature to speed up build time " YES)
 option(GIT_SUBMODULE "Check submodules during build" ON)
 option(ENABLE_ASAN "Build with address sanitizer" NO)
+option(BUILD_MASTER "Build the stable (master) channel: version string without build number" NO)
+
+IF(BUILD_MASTER)
+  add_definitions(-DBUILD_MASTER)
+ENDIF()
 
 ### COMPILER SETTINGS
 #
 #
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
+  CMAKE_POLICY(SET CMP0167 NEW)
+endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -91,7 +99,9 @@ MACRO(History_GET_REVISION variable)
   IF(EXISTS ${CMAKE_SOURCE_DIR}/History.txt)
     MESSAGE(STATUS "Read ProjectRevision from History.txt")
     CMAKE_POLICY(SET CMP0007 NEW)
-    CMAKE_POLICY(SET CMP0167 NEW)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
+      CMAKE_POLICY(SET CMP0167 NEW)
+    endif()
     FILE(STRINGS ${CMAKE_SOURCE_DIR}/History.txt AppVersionContent)
     LIST(GET AppVersionContent 0 AppVersionContent)
     STRING(REPLACE " " ";" AppVersionContent ${AppVersionContent})
@@ -128,9 +138,10 @@ IF(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
 # Update submodules as needed
     IF(GIT_SUBMODULE)
         message(STATUS "Submodule update")
-    execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+        execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --remote --force
                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                         RESULT_VARIABLE GIT_SUBMOD_RESULT)
+        
         IF(NOT GIT_SUBMOD_RESULT EQUAL "0")
             message(FATAL_ERROR "git submodule update --init failed with ${GIT_SUBMOD_RESULT}, please checkout submodules")
         ENDIF()
@@ -184,6 +195,7 @@ main/SignalHandler.cpp
 main/SQLHelper.cpp
 main/StoppableTask.cpp
 main/SunRiseSet.cpp
+main/ThemeSettings.cpp
 main/TrendCalculator.cpp
 main/DomoticzWebsocketHandler.cpp
 main/WebServer.cpp
@@ -388,6 +400,8 @@ hardware/plugins/Plugins.cpp
 hardware/plugins/PluginManager.cpp
 hardware/plugins/PluginProtocols.cpp
 hardware/plugins/PluginTransports.cpp
+hardware/plugins/PluginWebSocketRegistry.cpp
+hardware/plugins/PluginWebSocketBridge.cpp
 hardware/plugins/PythonObjects.cpp
 hardware/plugins/PythonObjectEx.cpp
 notifications/NotificationBase.cpp
@@ -431,9 +445,12 @@ tinyxpath/xpath_syntax.cpp
 IF(USE_BUILTIN_JSONCPP)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build jsoncpp_lib as a shared library." FORCE)
   set(BUILD_STATIC_LIBS ON CACHE BOOL "Build jsoncpp_lib as a static library." FORCE)
+  set(BUILD_OBJECT_LIBS OFF CACHE BOOL "Build jsoncpp_lib as an object library." FORCE)
   set(JSONCPP_WITH_TESTS OFF CACHE BOOL "Enable jsoncpp tests" FORCE)
   set(JSONCPP_WITH_POST_BUILD_UNITTEST OFF CACHE BOOL "Enable jsoncpp post build unit tests" FORCE)
   set(JSONCPP_WITH_PKGCONFIG_SUPPORT OFF CACHE BOOL "Enable jsoncpp pkgconfig support" FORCE)
+  set(JSONCPP_WITH_CMAKE_PACKAGE OFF CACHE BOOL "Generate and install cmake package files" FORCE)
+  set(JSONCPP_WITH_INSTALL OFF CACHE BOOL "Include JsonCpp in the install target" FORCE)
   add_subdirectory(extern/jsoncpp ${CMAKE_CURRENT_BINARY_DIR}/jsoncpp_build EXCLUDE_FROM_ALL)
   if(NOT MSVC)
     target_compile_options(jsoncpp_static PRIVATE -Wno-deprecated-declarations)
@@ -465,9 +482,12 @@ set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR})
 # LUA
 #
 IF(USE_LUA_STATIC)
-  find_library(LUA_LIBRARIES NAMES liblua5.3.a)
+  # Debian/Ubuntu: liblua5.3.a ; Alpine: liblua-5.3.a
+  find_library(LUA_LIBRARIES NAMES liblua5.3.a liblua-5.3.a)
 ELSE(USE_LUA_STATIC)
-  find_library(LUA_LIBRARIES NAMES liblua5.3.so)
+  # Debian/Ubuntu provide the unversioned "liblua5.3.so" symlink via the -dev
+  # package, while Alpine ships the versioned "liblua-5.3.so.0" soname.
+  find_library(LUA_LIBRARIES NAMES liblua5.3.so liblua-5.3.so.0 liblua5.3.so.0 liblua-5.3.so)
 ENDIF(USE_LUA_STATIC)
 find_path(LUA_INCLUDE_DIRS NAMES lua5.3/lua.h)
 IF(LUA_LIBRARIES AND LUA_INCLUDE_DIRS)
@@ -552,9 +572,11 @@ MESSAGE(STATUS "###########################")
 MESSAGE(STATUS "Compiling Revision #${ProjectRevision}")
 MESSAGE(STATUS "###########################")
 
-# The version number.
-set (domoticz_VERSION_MAJOR 2025)
-set (domoticz_VERSION_MINOR 2)
+# The version number. Keep in sync with VERSION_MAJOR/VERSION_MINOR in
+# main/appversion.h, which is what the running application reports; these two
+# only feed the CPack package name and had drifted a release behind.
+set (domoticz_VERSION_MAJOR 2026)
+set (domoticz_VERSION_MINOR 3)
 set (domoticz_VERSION_PATCH ${ProjectRevision})
 
 # explicitly say that the executable depends on the revisiontag
@@ -598,8 +620,11 @@ ENDIF(MQTT_LIBRARIES AND MQTT_INCLUDE_DIRS)
 # sqlite3
 IF(USE_BUILTIN_SQLITE)
   MESSAGE(STATUS "Using builtin SQLite library")
+  # the bundled sqlite-cmake defaults the SQL math functions to OFF; keep them
+  # enabled as before
+  set(SQLITE_ENABLE_MATH_FUNCTIONS ON CACHE BOOL "Enable the built-in SQL math functions.")
   add_subdirectory (extern/sqlite-amalgamation EXCLUDE_FROM_ALL)
-  target_link_libraries(domoticz SQLite::SQLite3)
+  target_link_libraries(domoticz sqlite::sqlite)
 ELSE(USE_BUILTIN_SQLITE)
   find_package(SQLite3)
   IF(SQLite3_FOUND)
@@ -856,6 +881,15 @@ IF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 ENDIF(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 
 install(TARGETS domoticz DESTINATION ${CMAKE_INSTALL_PREFIX})
+# When libwebem is built as a shared library (BUILD_SHARED_LIBS=ON, the case on
+# some distros such as Alpine) the domoticz binary links against it dynamically,
+# so the versioned .so (and its symlinks) must be installed alongside the
+# executable. For a static webem (the default) it is baked into the binary and
+# there is nothing to install.
+get_target_property(_webem_type webem TYPE)
+IF(_webem_type STREQUAL "SHARED_LIBRARY")
+  install(TARGETS webem LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX})
+ENDIF()
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/www DESTINATION ${CMAKE_INSTALL_PREFIX})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/License.txt DESTINATION ${CMAKE_INSTALL_PREFIX})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/History.txt DESTINATION ${CMAKE_INSTALL_PREFIX})

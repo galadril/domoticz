@@ -28,6 +28,7 @@
 #include "../notifications/NotificationHelper.h"
 #include "IFTTT.h"
 #include "KWHStats.h"
+#include "ThemeSettings.h"
 #ifdef ENABLE_PYTHON
 #include "../hardware/plugins/Plugins.h"
 #endif
@@ -43,7 +44,7 @@
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
-#define DB_VERSION 177
+#define DB_VERSION 182
 
 #define DEFAULT_ADMINUSER "admin"
 #define DEFAULT_ADMINPWD "domoticz"
@@ -634,8 +635,20 @@ constexpr auto sqlCreateApplications =
 "[SigningSecret] VARCHAR(100) DEFAULT '',"
 "[RefreshExpire] INTEGER DEFAULT 0,"
 "[AcceptLegacyTokensUntil] INTEGER DEFAULT 0,"
+"[RedirectUris] TEXT DEFAULT '',"
 "[LastSeen] DATETIME DEFAULT NULL,"
 "[LastUpdate] DATETIME DEFAULT(datetime('now', 'localtime'))"
+");";
+
+constexpr auto sqlCreateAccessTokens =
+"CREATE TABLE IF NOT EXISTS [AccessTokens]("
+"[ID] INTEGER PRIMARY KEY, "
+"[Name] VARCHAR(100) NOT NULL DEFAULT '', "
+"[Rights] INTEGER NOT NULL DEFAULT 0, "
+"[Expiry] INTEGER NOT NULL DEFAULT 0, "
+"[TokenHash] VARCHAR(64) NOT NULL DEFAULT '', "
+"[CreatedAt] DATETIME DEFAULT(datetime('now', 'localtime')), "
+"[LastUpdate] DATETIME DEFAULT NULL"
 ");";
 
 constexpr auto sqlCreateDashboardLayouts =
@@ -780,7 +793,9 @@ bool CSQLHelper::OpenDatabase()
 	query(sqlCreateUserSessions);
 	query(sqlCreateMobileDevices);
 	query(sqlCreateApplications);
+	query(sqlCreateAccessTokens);
 	query(sqlCreateDashboardLayouts);
+	CThemeSettings::CreateTable();
 	//Add indexes to log tables
 	query("create index if not exists ds_hduts_idx	on DeviceStatus(HardwareID, DeviceID, Unit, Type, SubType);");
 	query("create index if not exists f_id_idx		on Fan(DeviceRowID);");
@@ -3368,6 +3383,78 @@ bool CSQLHelper::OpenDatabase()
 				query("ALTER TABLE Hardware ADD COLUMN [Settings] TEXT DEFAULT ''");
 			}
 		}
+		if (dbversion < 178)
+		{
+			// Recalculate historic P1 day prices in MultiMeter_Calendar (GitHub #6915).
+			// Returned energy used to be priced at the usage tariff (T1/T2) instead of the
+			// configured return tariffs (R1/R2). Only applies when prices come from the internal
+			// meter tariffs; with a dynamic price device the stored prices are correct.
+			// Each day counter accrues only while its own tariff channel is active, so the
+			// corrected price follows directly from the calendar row itself.
+			int iHP_E_Idx = 0;
+			GetPreferencesVar("HourIdxElectricityDevice", iHP_E_Idx);
+			if (iHP_E_Idx == 0x98765)
+			{
+				int nValue = 0;
+				GetPreferencesVar("CostEnergy", nValue);
+				float priceT1 = static_cast<float>(nValue) / 10000.0F;
+				nValue = 0;
+				GetPreferencesVar("CostEnergyT2", nValue);
+				float priceT2 = static_cast<float>(nValue) / 10000.0F;
+				//The 800 (=0.08) fallback matches the default seeding that normally runs at
+				//every startup (which also resets a stored 0 back to 800)
+				nValue = 0;
+				if ((!GetPreferencesVar("CostEnergyR1", nValue)) || (nValue == 0))
+					nValue = 800;
+				float priceR1 = static_cast<float>(nValue) / 10000.0F;
+				nValue = 0;
+				if ((!GetPreferencesVar("CostEnergyR2", nValue)) || (nValue == 0))
+					nValue = 800;
+				float priceR2 = static_cast<float>(nValue) / 10000.0F;
+
+				float EnergyDivider = 1000.0F;
+				if (GetPreferencesVar("MeterDividerEnergy", nValue) && (nValue != 0))
+					EnergyDivider = static_cast<float>(nValue);
+
+				// Value1 = T1 usage, Value2 = R1 return, Value5 = T2 usage, Value6 = R2 return (all in Wh).
+				// Same spike protection as the day rollover: skip rows where the implied
+				// tariff would exceed a plausible rate (e.g. counter glitches); the energy
+				// divider cancels on both sides of that comparison
+				safe_query(
+					"UPDATE MultiMeter_Calendar SET Price = ((Value1*%f + Value5*%f) - (Value2*%f + Value6*%f)) / %f "
+					"WHERE (DeviceRowID IN (SELECT ID FROM DeviceStatus WHERE (Type=%d))) "
+					"AND (ABS((Value1*%f + Value5*%f) - (Value2*%f + Value6*%f)) <= ((Value1 + Value2 + Value5 + Value6) * 3.0))",
+					priceT1, priceT2, priceR1, priceR2, EnergyDivider, pTypeP1Power,
+					priceT1, priceT2, priceR1, priceR2);
+			}
+		}
+		if (dbversion < 179)
+		{
+			// Seed the proxy-forwarding header family with the value that was hardcoded
+			// before it became configurable, so upgrading changes nothing for existing
+			// reverse-proxy setups.
+			UpdatePreferencesVar("WebProxyHeaderFamily", static_cast<int>(http::server::ProxyHeaderFamily::XForwardedFor));
+		}
+		if (dbversion < 180)
+		{
+			// Deleting a user used to leave its DashboardLayouts rows behind. Since Users.ID
+			// is an INTEGER PRIMARY KEY (a rowid alias), SQLite can reuse that id for a new
+			// user, who would then silently inherit the old user's dashboard layouts. Purge
+			// any layouts whose userid no longer matches an existing user.
+			query("DELETE FROM DashboardLayouts WHERE userid NOT IN (SELECT ID FROM Users)");
+		}
+		if (dbversion < 181)
+		{
+			// Applications can now pin the OAuth2 redirect URIs they accept. Existing
+			// applications start with none registered, which keeps the previous
+			// behaviour of accepting any shape-valid URI until an administrator fills
+			// the list in, so upgrading breaks no existing account linking.
+			query("ALTER TABLE Applications ADD COLUMN [RedirectUris] TEXT DEFAULT ''");
+		}
+		if (dbversion < 182)
+		{
+			CThemeSettings::MigrateFromPreferences();
+		}
 	}
 	else if (bNewInstall)
 	{
@@ -3378,6 +3465,9 @@ bool CSQLHelper::OpenDatabase()
 		// Admin user is no longer created here - created via setup wizard or Docker env vars
 		safe_query("INSERT INTO Applications (Active, Public, Applicationname) VALUES (1, 1, 'domoticzUI')");
 		safe_query("INSERT INTO Applications (Active, Public, Applicationname) VALUES (0, 0, 'domoticzMobileApp')");
+		// Same default as the upgrade path (DB_VERSION 179), so the Settings page
+		// shows the family that is actually in use rather than an empty selection.
+		UpdatePreferencesVar("WebProxyHeaderFamily", static_cast<int>(http::server::ProxyHeaderFamily::XForwardedFor));
 	}
 	UpdatePreferencesVar("DB_Version", DB_VERSION);
 
@@ -3898,7 +3988,7 @@ bool CSQLHelper::OpenDatabase()
 
 void CSQLHelper::CloseDatabase()
 {
-	std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+	std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 	if (m_dbase != nullptr)
 	{
 		OptimizeDatabase(m_dbase);
@@ -4625,12 +4715,48 @@ void CSQLHelper::safe_exec_no_return(const char* fmt, ...)
 	sqlite3_free(zQuery);
 }
 
+int CSQLHelper::safe_exec_changes(const char* fmt, ...)
+{
+	if (!m_dbase)
+		return -1;
+
+	va_list args;
+	va_start(args, fmt);
+	char* zQuery = sqlite3_vmprintf(fmt, args);
+	va_end(args);
+	if (!zQuery)
+		return -1;
+	std::string szQuery = zQuery;
+	sqlite3_free(zQuery);
+
+	std::unique_lock<std::timed_mutex> l(m_sqlQueryMutex, std::defer_lock);
+	if (!l.try_lock_for(std::chrono::minutes(5)))
+	{
+		_log.Log(LOG_ERROR, "SQL exec mutex timeout (>5min, possible query backlog). Query: %.200s", szQuery.c_str());
+		return -1;
+	}
+	char* errMsg = nullptr;
+	_log.Debug(DEBUG_SQL, "Exec:%s", szQuery.c_str());
+	if (sqlite3_exec(m_dbase, szQuery.c_str(), nullptr, nullptr, &errMsg) != SQLITE_OK)
+	{
+		_log.Log(LOG_ERROR, "SQL exec failed: %s (%.200s)", errMsg ? errMsg : "unknown error", szQuery.c_str());
+		sqlite3_free(errMsg);
+		return -1;
+	}
+	return sqlite3_changes(m_dbase);
+}
+
 bool CSQLHelper::safe_UpdateBlobInTableWithID(const std::string& Table, const std::string& Column, const std::string& sID, const std::string& BlobData)
 {
 	if (!m_dbase)
 		return false;
 
-	std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+	std::unique_lock<std::timed_mutex> l(m_sqlQueryMutex, std::defer_lock);
+	if (!l.try_lock_for(std::chrono::minutes(5)))
+	{
+		_log.Log(LOG_ERROR, "SQL blob-update mutex timeout (Table=%s, ID=%s)", Table.c_str(), sID.c_str());
+		return false;
+	}
 
 	sqlite3_stmt *stmt = nullptr;
 	char* zQuery = sqlite3_mprintf("UPDATE %q SET %q = ? WHERE ID=%q", Table.c_str(), Column.c_str(), sID.c_str());
@@ -4641,20 +4767,17 @@ bool CSQLHelper::safe_UpdateBlobInTableWithID(const std::string& Table, const st
 	}
 	int rc = sqlite3_prepare_v2(m_dbase, zQuery, -1, &stmt, nullptr);
 	sqlite3_free(zQuery);
-	if (rc != SQLITE_OK) {
+	if (rc != SQLITE_OK)
 		return false;
-	}
 	rc = sqlite3_bind_blob(stmt, 1, BlobData.c_str(), static_cast<int>(BlobData.size()), SQLITE_STATIC);
-	if (rc != SQLITE_OK) {
+	if (rc != SQLITE_OK)
+	{
+		sqlite3_finalize(stmt);
 		return false;
 	}
 	rc = sqlite3_step(stmt);
-	if (rc != SQLITE_DONE)
-	{
-		return false;
-	}
 	sqlite3_finalize(stmt);
-	return true;
+	return (rc == SQLITE_DONE);
 }
 
 std::vector<std::vector<std::string>> CSQLHelper::safe_query(const char *fmt, ...)
@@ -4700,11 +4823,16 @@ std::vector<std::vector<std::string> > CSQLHelper::query(const std::string& szQu
 		std::vector<std::vector<std::string> > results;
 		return results;
 	}
-	std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+	std::unique_lock<std::timed_mutex> l(m_sqlQueryMutex, std::defer_lock);
+	if (!l.try_lock_for(std::chrono::minutes(5)))
+	{
+		_log.Log(LOG_ERROR, "SQL query mutex timeout (>5min, possible query backlog). Query: %.200s", szQuery.c_str());
+		return {};
+	}
 
 	sqlite3_stmt* statement;
 	std::vector<std::vector<std::string> > results;
-    _log.Debug(DEBUG_SQL, "Query:%s", szQuery.c_str());
+	_log.Debug(DEBUG_SQL, "Query:%s", szQuery.c_str());
 	if (sqlite3_prepare_v2(m_dbase, szQuery.c_str(), -1, &statement, nullptr) == SQLITE_OK)
 	{
 		int cols = sqlite3_column_count(statement);
@@ -4767,7 +4895,7 @@ std::vector<std::vector<std::string> > CSQLHelper::queryBlob(const std::string& 
 		std::vector<std::vector<std::string> > results;
 		return results;
 	}
-	std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+	std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 
 	sqlite3_stmt* statement;
 	std::vector<std::vector<std::string> > results;
@@ -5520,6 +5648,198 @@ uint64_t CSQLHelper::UpdateManagedValueInt(
 	return ulID;
 }
 
+namespace
+{
+	//Returns the number of digits after the decimal point in a numeric token, or 0 if it has none.
+	int CountDecimals(const std::string &token)
+	{
+		size_t dot = token.find('.');
+		if (dot == std::string::npos)
+			return 0;
+		int count = 0;
+		for (size_t i = dot + 1; i < token.size() && (token[i] >= '0') && (token[i] <= '9'); i++)
+			count++;
+		return count;
+	}
+
+	//Formats value with as many decimals as originalToken had (never fewer than minDecimals), so a
+	//calibrated field keeps the precision convention of whichever ingest path produced the raw value
+	//(e.g. 1 decimal from RFXCom hardware, 2 decimals from the JSON API), instead of a single hardcoded
+	//precision that would silently change what already-working paths store.
+	std::string FormatWithMatchingPrecision(const float value, const std::string &originalToken, const int minDecimals)
+	{
+		int decimals = CountDecimals(originalToken);
+		if (decimals < minDecimals)
+			decimals = minDecimals;
+		return std_format("%.*f", decimals, value);
+	}
+}
+
+std::string CSQLHelper::ApplyDeviceCalibration(const unsigned char devType, const unsigned char subType, const float AddjValue, const float AddjMulti, const float AddjValue2, const float AddjMulti2, const std::string &sValue) const
+{
+	//Nothing configured on the Calibration tab for this device, leave the value untouched (including its
+	//formatting) so uncalibrated devices are never affected by this function.
+	if ((AddjValue == 0.0F) && (AddjMulti == 1.0F) && (AddjValue2 == 0.0F) && (AddjMulti2 == 1.0F))
+		return sValue;
+
+	std::vector<std::string> parts;
+	StringSplit(sValue, ";", parts);
+
+	auto joinParts = [&parts]() -> std::string {
+		std::string sResult;
+		for (size_t i = 0; i < parts.size(); i++)
+		{
+			if (i != 0)
+				sResult += ";";
+			sResult += parts[i];
+		}
+		return sResult;
+	};
+
+	switch (devType)
+	{
+	case pTypeTEMP:
+	{
+		//Single temperature value
+		if (AddjValue == 0.0F)
+			return sValue;
+		float temp = static_cast<float>(atof(sValue.c_str())) + AddjValue;
+		return FormatWithMatchingPrecision(temp, sValue, 1);
+	}
+	case pTypeTEMP_HUM:
+	{
+		//temp;humidity;humidity_status
+		//sTypeTH_LC_TC (LaCrosse combined temp+hum) is built up manually in MainWorker from two
+		//already calibrated sources and deliberately not touched here again, see decode_Temp/decode_Hum
+		if (subType == sTypeTH_LC_TC)
+			return sValue;
+		if ((AddjValue == 0.0F) || (parts.size() < 3))
+			return sValue;
+		std::string origTemp = parts[0];
+		float temp = static_cast<float>(atof(origTemp.c_str())) + AddjValue;
+		parts[0] = FormatWithMatchingPrecision(temp, origTemp, 1);
+		return joinParts();
+	}
+	case pTypeTEMP_HUM_BARO:
+	{
+		//temp;humidity;humidity_status;barometer;forecast
+		if (parts.size() < 5)
+			return sValue;
+		bool bChanged = false;
+		if (AddjValue != 0.0F)
+		{
+			std::string origTemp = parts[0];
+			float temp = static_cast<float>(atof(origTemp.c_str())) + AddjValue;
+			parts[0] = FormatWithMatchingPrecision(temp, origTemp, 1);
+			bChanged = true;
+		}
+		if (AddjValue2 != 0.0F)
+		{
+			std::string origBaro = parts[3];
+			float baro = static_cast<float>(atof(origBaro.c_str())) + AddjValue2;
+			//Matches decode_TempHumBaro/MainWorker::UpdateDevice: float barometer for THBFloat, rounded int
+			//otherwise. Kept explicit (rather than only relying on derived precision) so a non-float
+			//barometer is always stored as a whole number even if a caller ever hands in a fractional token.
+			if (subType == sTypeTHBFloat)
+				parts[3] = FormatWithMatchingPrecision(baro, origBaro, 1);
+			else
+				parts[3] = std_format("%d", static_cast<int>(rint(baro)));
+			bChanged = true;
+		}
+		if (!bChanged)
+			return sValue;
+		return joinParts();
+	}
+	case pTypeTEMP_BARO:
+	{
+		//temp;barometer;forecast;altitude
+		if (parts.size() < 2)
+			return sValue;
+		bool bChanged = false;
+		if (AddjValue != 0.0F)
+		{
+			std::string origTemp = parts[0];
+			float temp = static_cast<float>(atof(origTemp.c_str())) + AddjValue;
+			parts[0] = FormatWithMatchingPrecision(temp, origTemp, 1);
+			bChanged = true;
+		}
+		if (AddjValue2 != 0.0F)
+		{
+			std::string origBaro = parts[1];
+			float baro = static_cast<float>(atof(origBaro.c_str())) + AddjValue2;
+			parts[1] = FormatWithMatchingPrecision(baro, origBaro, 1);
+			bChanged = true;
+		}
+		if (!bChanged)
+			return sValue;
+		return joinParts();
+	}
+	case pTypeUV:
+	{
+		//UV Level;temp (temp is only meaningful for sTypeUV3, but is always present)
+		if (parts.size() < 2)
+			return sValue;
+		bool bChanged = false;
+		if (AddjMulti2 != 1.0F)
+		{
+			std::string origLevel = parts[0];
+			float level = static_cast<float>(atof(origLevel.c_str())) * AddjMulti2;
+			parts[0] = FormatWithMatchingPrecision(level, origLevel, 1);
+			bChanged = true;
+		}
+		if ((subType == sTypeUV3) && (AddjValue != 0.0F))
+		{
+			std::string origTemp = parts[1];
+			float temp = static_cast<float>(atof(origTemp.c_str())) + AddjValue;
+			parts[1] = FormatWithMatchingPrecision(temp, origTemp, 1);
+			bChanged = true;
+		}
+		if (!bChanged)
+			return sValue;
+		return joinParts();
+	}
+	case pTypeWEIGHT:
+	{
+		if (AddjValue == 0.0F)
+			return sValue;
+		float weight = static_cast<float>(atof(sValue.c_str())) + AddjValue;
+		return FormatWithMatchingPrecision(weight, sValue, 1);
+	}
+	case pTypeRFXSensor:
+	{
+		//Only the temperature subtype was ever calibrated
+		if ((subType != sTypeRFXSensorTemp) || (AddjValue == 0.0F))
+			return sValue;
+		float temp = static_cast<float>(atof(sValue.c_str())) + AddjValue;
+		return FormatWithMatchingPrecision(temp, sValue, 1);
+	}
+	case pTypeGeneral:
+	{
+		//pressure;forecast (used by MQTT Auto Discovery standalone pressure sensors). MQTT builds this
+		//field with "%.02f", so floor the precision at 2 decimals to match.
+		if ((subType != sTypeBaro) || (AddjValue2 == 0.0F) || (parts.size() < 2))
+			return sValue;
+		std::string origPressure = parts[0];
+		float pressure = static_cast<float>(atof(origPressure.c_str())) + AddjValue2;
+		parts[0] = FormatWithMatchingPrecision(pressure, origPressure, 2);
+		return joinParts();
+	}
+	default:
+		return sValue;
+	}
+}
+
+std::string CSQLHelper::GetCalibratedValue(const int HardwareID, const char *ID, const unsigned char unit, const unsigned char devType, const unsigned char subType, const std::string &sValue)
+{
+	float AddjValue = 0.0F;
+	float AddjMulti = 1.0F;
+	float AddjValue2 = 0.0F;
+	float AddjMulti2 = 1.0F;
+	GetAddjustment(HardwareID, ID, unit, devType, subType, AddjValue, AddjMulti);
+	GetAddjustment2(HardwareID, ID, unit, devType, subType, AddjValue2, AddjMulti2);
+	return ApplyDeviceCalibration(devType, subType, AddjValue, AddjMulti, AddjValue2, AddjMulti2, sValue);
+}
+
 uint64_t CSQLHelper::UpdateValueInt(
         const int HardwareID, const int OrgHardwareID, const char *ID, const unsigned char unit, const unsigned char devType, const unsigned char subType,
         const unsigned char signallevel, const unsigned char batterylevel, const int nValue, const char *sValue, std::string &devname,
@@ -5542,7 +5862,7 @@ uint64_t CSQLHelper::UpdateValueInt(
 	bool bIsManagedCounter = (devType == pTypeGeneral && subType == sTypeManagedCounter);
 
 	std::vector<std::vector<std::string> > result;
-	result = safe_query("SELECT ID, Name, Used, SwitchType, nValue, sValue, LastUpdate, Options FROM DeviceStatus WHERE (HardwareID=%d AND OrgHardwareID=%d AND DeviceID='%q' AND Unit=%d AND Type=%d AND SubType=%d)", HardwareID, OrgHardwareID, ID, unit, devType, subType);
+	result = safe_query("SELECT ID, Name, Used, SwitchType, nValue, sValue, LastUpdate, Options, AddjValue, AddjMulti, AddjValue2, AddjMulti2 FROM DeviceStatus WHERE (HardwareID=%d AND OrgHardwareID=%d AND DeviceID='%q' AND Unit=%d AND Type=%d AND SubType=%d)", HardwareID, OrgHardwareID, ID, unit, devType, subType);
 
 	if (!result.empty())
 	{
@@ -5594,6 +5914,17 @@ uint64_t CSQLHelper::UpdateValueInt(
 		stype = (_eSwitchType)atoi(result[0][3].c_str());
 		nValueBeforeUpdate = atoi(result[0][4].c_str());
 		sValueBeforeUpdate = result[0][5];
+
+		//Apply the device Calibration tab (if any) to the incoming value before it is compared, stored or
+		//used for notifications, so every ingest path (hardware, MQTT, Python plugins, dzVents, JSON API, ...)
+		//is calibrated the same way, instead of only the paths that historically did this by hand.
+		//New devices (the Insert branch above) cannot have user set calibration yet, so this only applies here.
+		float calAddjValue = static_cast<float>(atof(result[0][8].c_str()));
+		float calAddjMulti = static_cast<float>(atof(result[0][9].c_str()));
+		float calAddjValue2 = static_cast<float>(atof(result[0][10].c_str()));
+		float calAddjMulti2 = static_cast<float>(atof(result[0][11].c_str()));
+		sValueUpdate = ApplyDeviceCalibration(devType, subType, calAddjValue, calAddjMulti, calAddjValue2, calAddjMulti2, sValue);
+		sValue = sValueUpdate.c_str();
 
 		std::string sLastUpdate = TimeToString(nullptr, TF_DateTime);
 
@@ -7679,6 +8010,12 @@ void CSQLHelper::UpdateFanLog()
 	}
 }
 
+bool CSQLHelper::CalendarEntryExists(const char *szTable, const uint64_t DeviceRowID, const char *szDate)
+{
+	std::vector<std::vector<std::string>> result = safe_query("SELECT 1 FROM %s WHERE (DeviceRowID==%" PRIu64 ") AND (Date=='%q') LIMIT 1", szTable, DeviceRowID, szDate);
+	return !result.empty();
+}
+
 void CSQLHelper::AddCalendarTemperature()
 {
 	std::string usedFilter = m_bLogUnusedSensors ? "" : " AND DeviceRowID IN (SELECT ID FROM DeviceStatus WHERE Used=1)";
@@ -7706,6 +8043,9 @@ void CSQLHelper::AddCalendarTemperature()
 	for (const auto &sddev : resultdevices)
 	{
 		uint64_t ID = std::stoull(sddev[0]);
+
+		if (CalendarEntryExists("Temperature_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
 
 		result = safe_query("SELECT MIN(Temperature), MAX(Temperature), AVG(Temperature), MIN(Chill), MAX(Chill), AVG(Humidity), AVG(Barometer), MIN(DewPoint), MIN(SetPoint), MAX(SetPoint), AVG(SetPoint) FROM Temperature WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00')",
 			ID,
@@ -7775,6 +8115,9 @@ void CSQLHelper::AddCalendarUpdateRain()
 	for (const auto &sddev : resultdevices)
 	{
 		uint64_t ID = std::stoull(sddev[0]);
+
+		if (CalendarEntryExists("Rain_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
 
 		//Get Device Information
 		result = safe_query("SELECT SubType FROM DeviceStatus WHERE (ID='%" PRIu64 "')", ID);
@@ -7883,6 +8226,9 @@ void CSQLHelper::AddCalendarUpdateMeter()
 		float price = 0.0F;
 
 		uint64_t ID = std::stoull(sddev[0]);
+
+		if (CalendarEntryExists("Meter_Calendar", ID, szDateStart) || CalendarEntryExists("MultiMeter_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
 
 		//Get Device Information
 		result = safe_query("SELECT Name, HardwareID, DeviceID, Unit, Type, SubType, SwitchType, Options, AddjValue2 FROM DeviceStatus WHERE (ID='%" PRIu64 "')", ID);
@@ -8136,6 +8482,9 @@ void CSQLHelper::AddCalendarUpdateMultiMeter()
 	{
 		uint64_t ID = std::stoull(sddev[0]);
 
+		if (CalendarEntryExists("MultiMeter_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
+
 		//Get Device Information
 		result = safe_query("SELECT Name, HardwareID, DeviceID, Unit, Type, SubType, SwitchType, Options FROM DeviceStatus WHERE (ID='%" PRIu64 "')", ID);
 		if (result.empty())
@@ -8271,6 +8620,9 @@ void CSQLHelper::AddCalendarUpdateWind()
 	{
 		uint64_t ID = std::stoull(sddev[0]);
 
+		if (CalendarEntryExists("Wind_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
+
 		result = safe_query("SELECT AVG(Direction), MIN(Speed), MAX(Speed), MIN(Gust), MAX(Gust) FROM Wind WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00')",
 			ID,
 			szDateStart,
@@ -8329,6 +8681,9 @@ void CSQLHelper::AddCalendarUpdateUV()
 	{
 		uint64_t ID = std::stoull(sddev[0]);
 
+		if (CalendarEntryExists("UV_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
+
 		result = safe_query("SELECT MAX(Level) FROM UV WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00')",
 			ID,
 			szDateStart,
@@ -8378,6 +8733,9 @@ void CSQLHelper::AddCalendarUpdatePercentage()
 	for (const auto &sddev : resultdevices)
 	{
 		uint64_t ID = std::stoull(sddev[0]);
+
+		if (CalendarEntryExists("Percentage_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
 
 		result = safe_query("SELECT MIN(Percentage), MAX(Percentage), AVG(Percentage) FROM Percentage WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00')",
 			ID,
@@ -8431,6 +8789,9 @@ void CSQLHelper::AddCalendarUpdateFan()
 	for (const auto &sddev : resultdevices)
 	{
 		uint64_t ID = std::stoull(sddev[0]);
+
+		if (CalendarEntryExists("Fan_Calendar", ID, szDateStart))
+			continue; //already have an entry for this day (e.g. the daily schedule ran twice around midnight)
 
 		result = safe_query("SELECT MIN(Speed), MAX(Speed), AVG(Speed) FROM Fan WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00')",
 			ID,
@@ -8522,7 +8883,7 @@ void CSQLHelper::ClearShortLog()
 int CSQLHelper::PruneUnusedSensorLogs()
 {
 	int total = 0;
-	std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+	std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 
 	char* errorMessage = nullptr;
 	int rc = sqlite3_exec(m_dbase, "BEGIN TRANSACTION;", nullptr, nullptr, &errorMessage);
@@ -8884,6 +9245,7 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 	}
 
 	int64_t total_positive_delta_wh = 0;
+	int64_t total_meter_spike_delta_wh = 0; // sum of per-jump shortlog corrections (for DeviceStatus)
 	for (const auto& spike : spikes)
 	{
 		if (spike.is_positive)
@@ -8900,7 +9262,7 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 	{
 		if (ms.is_positive)
 		{
-			total_positive_delta_wh += ms.delta;
+			total_meter_spike_delta_wh += ms.delta;
 			results.push_back(std_format("Positive spike in Meter at %s: +%.3f kWh (current period, not yet in Meter_Calendar)",
 				ms.date.c_str(), ms.delta / 1000.0));
 		}
@@ -8912,6 +9274,8 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 	}
 	if (total_positive_delta_wh > 0)
 		results.push_back(std_format("Positive spike total correction: -%.3f kWh", total_positive_delta_wh / 1000.0));
+	if (total_meter_spike_delta_wh > 0)
+		results.push_back(std_format("Shortlog correction total: -%.3f kWh", total_meter_spike_delta_wh / 1000.0));
 
 	if (dry_run)
 	{
@@ -8921,8 +9285,12 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 
 	// --- Fix positive spikes in Meter_Calendar ---
 	// Each positive spike inflated the cumulative Counter for all subsequent days.
-	// Process in chronological order; each UPDATE operates on the already-corrected DB,
-	// so sequentially subtracting each spike_delta gives the correct cumulative result.
+	// We estimate the real daily production from sub-threshold Meter increments so we
+	// can subtract only the spike component (anomaly minus real production) from the
+	// cumulative Counter, preserving the real production in the calendar Value.
+	// NOTE: The Meter shortlog is corrected by the Phase 2 meter_spikes fix below via
+	// per-jump deltas. Applying a bulk correction here too causes double-subtraction
+	// that zeros all shortlog data — so we do NOT touch the Meter table here.
 	for (const auto& spike : spikes)
 	{
 		if (!spike.is_positive)
@@ -8930,23 +9298,48 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 
 		const std::string& spike_date = spike.date;
 
-		// Subtract spike_delta from Counter for spike day and all subsequent days
+		// Estimate real daily production by summing sub-threshold Meter increments for
+		// this day. Spike jumps (> threshold_wh) are excluded, so only genuine increments
+		// are counted. Uses the same logic as the negative-spike handler below.
+		int64_t actual_production_wh = 0;
+		auto spike_day_rows = safe_query(
+			"SELECT Value FROM Meter WHERE (DeviceRowID='%" PRIu64 "') "
+			"AND (Date >= '%q 00:00:00') AND (Date < datetime('%q', '+1 day')) ORDER BY Date ASC",
+			idx, spike_date.c_str(), spike_date.c_str());
+		if (spike_day_rows.size() >= 2)
+		{
+			int64_t prev_val = 0;
+			try { prev_val = std::stoll(spike_day_rows[0][0]); } catch (...) {}
+			for (size_t i = 1; i < spike_day_rows.size(); i++)
+			{
+				int64_t cur_val = 0;
+				try { cur_val = std::stoll(spike_day_rows[i][0]); } catch (...) { continue; }
+				int64_t delta = cur_val - prev_val;
+				if (delta > 0 && delta < threshold_wh)
+					actual_production_wh += delta;
+				prev_val = cur_val;
+			}
+			results.push_back(std_format("Spike day %s: real production %.3f kWh, spike component %.3f kWh",
+				spike_date.c_str(), actual_production_wh / 1000.0, (spike.value - actual_production_wh) / 1000.0));
+		}
+		else
+		{
+			results.push_back(std_format("Spike day %s: no Meter data, zeroing calendar Value", spike_date.c_str()));
+		}
+
+		// Subtract only the spike component (anomaly minus real production) from the
+		// cumulative Counter for the spike day and all subsequent days.
+		int64_t spike_component = spike.value - actual_production_wh;
 		safe_query(
 			"UPDATE Meter_Calendar SET Counter = Counter - %" PRId64 " "
 			"WHERE (DeviceRowID='%" PRIu64 "') AND (Date >= '%q')",
-			spike.value, idx, spike_date.c_str());
+			spike_component, idx, spike_date.c_str());
 
-		// Zero out Value for the spike day itself
+		// Set Value for the spike day to the real estimated production (not 0).
 		safe_query(
-			"UPDATE Meter_Calendar SET Value = 0 "
+			"UPDATE Meter_Calendar SET Value = %" PRId64 " "
 			"WHERE (DeviceRowID='%" PRIu64 "') AND (Date = '%q')",
-			idx, spike_date.c_str());
-
-		// Subtract spike_delta from cumulative counter Values in the short log
-		safe_query(
-			"UPDATE Meter SET Value = MAX(0, Value - %" PRId64 ") "
-			"WHERE (DeviceRowID='%" PRIu64 "') AND (Date >= '%q 00:00:00')",
-			spike.value, idx, spike_date.c_str());
+			actual_production_wh, idx, spike_date.c_str());
 	}
 
 	// --- Fix negative spikes in Meter_Calendar (counter reset stored without offset correction) ---
@@ -8988,7 +9381,6 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 				}
 				catch (const std::exception&)
 				{
-					prev_val = cur_val;
 					continue;
 				}
 				int64_t delta = cur_val - prev_val;
@@ -9012,6 +9404,7 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 	}
 
 	// --- Fix positive spikes found in recent Meter short log (current period, not yet in Meter_Calendar) ---
+	// Apply each per-jump spike correction to the Meter shortlog.
 	for (const auto& ms : meter_spikes)
 	{
 		if (!ms.is_positive)
@@ -9024,9 +9417,12 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 			ms.delta, idx, ms.date.c_str());
 	}
 
-	// Correct DeviceStatus: fix sValue total and LastLevel for positive spikes only.
-	// Negative spikes do not affect the current sValue (the live counter is already correct).
-	if (total_positive_delta_wh > 0)
+	// Correct DeviceStatus: fix sValue total and LastLevel.
+	// Use total_meter_spike_delta_wh (sum of per-jump corrections Phase 2 applied to the
+	// shortlog) so the DeviceStatus correction matches the corrected Meter value exactly.
+	// Negative calendar spikes do not affect the current sValue (the live counter is correct).
+	int64_t total_shortlog_correction_wh = total_meter_spike_delta_wh;
+	if (total_shortlog_correction_wh > 0)
 	{
 		auto devstatus = safe_query("SELECT sValue, LastLevel FROM DeviceStatus WHERE (ID='%" PRIu64 "')", idx);
 		if (!devstatus.empty())
@@ -9049,7 +9445,7 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 				double total_wh = atof(sValue.substr(pos + 1).c_str());
 				if (usage >= 0 && total_wh >= 0)
 				{
-					double new_total_wh = std::max(0.0, total_wh - static_cast<double>(total_positive_delta_wh));
+					double new_total_wh = std::max(0.0, total_wh - static_cast<double>(total_shortlog_correction_wh));
 					std::string new_svalue = std_format("%.3f;%.3f", usage, new_total_wh);
 
 					// Only correct LastLevel if it was inflated by a post-spike reset confirmation.
@@ -9057,7 +9453,7 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 					// the inflated post-spike value as the new offset; subtract the spike delta.
 					int64_t new_last_level = last_level;
 					if (last_level > static_cast<int64_t>(std::floor(new_total_wh)))
-						new_last_level = std::max(int64_t(0), last_level - total_positive_delta_wh);
+						new_last_level = std::max(int64_t(0), last_level - total_shortlog_correction_wh);
 
 					safe_query(
 						"UPDATE DeviceStatus SET sValue='%q', LastLevel='%" PRId64 "' WHERE (ID='%" PRIu64 "')",
@@ -9070,14 +9466,34 @@ bool CSQLHelper::FixKwhCounterSpikes(uint64_t idx, double max_daily_kwh, bool dr
 		}
 	}
 
-	_log.Log(LOG_STATUS, "FixKwhCounterSpikes: device %" PRIu64 " corrected %d spike(s), total -%.3f kWh",
-		idx, static_cast<int>(spikes.size() + meter_spikes.size()), total_positive_delta_wh / 1000.0);
+	_log.Log(LOG_STATUS, "FixKwhCounterSpikes: device %" PRIu64 " corrected %d calendar spike(s), %d shortlog spike(s), shortlog correction -%.3f kWh",
+		idx, static_cast<int>(spikes.size()), static_cast<int>(meter_spikes.size()), total_meter_spike_delta_wh / 1000.0);
 
 	if (CKWHStats::RemoveSpikeStats(idx))
 		results.push_back("Weekly pattern: removed contaminated hourly/daily averages");
 	int pricesFixed = SanitizeCalendarData(idx);
 	if (pricesFixed > 0)
 		results.push_back(std_format("Fixed %d invalid price entries in calendar", pricesFixed));
+
+	// Immediately refresh the cached today-price so the month chart shows the correct
+	// "earned/costs" value without waiting for the next UpdateMeter() cycle (up to 5 min).
+	{
+		int tValue = 0;
+		float energyDivider = 1000.0F;
+		if (GetPreferencesVar("MeterDividerEnergy", tValue))
+			energyDivider = float(tValue);
+		time_t now = mytime(nullptr);
+		struct tm tm1;
+		localtime_r(&now, &tm1);
+		char szDateStart[40], szDateEnd[40];
+		sprintf(szDateStart, "%04d-%02d-%02d", tm1.tm_year + 1900, tm1.tm_mon + 1, tm1.tm_mday);
+		sprintf(szDateEnd, "%s 23:59:59", szDateStart);
+		float freshPrice = 0;
+		if (CalcMeterPrice(idx, energyDivider, szDateStart, szDateEnd, freshPrice))
+			m_actual_prices[idx] = freshPrice;
+		else
+			m_actual_prices.erase(idx);
+	}
 
 	return true;
 }
@@ -9166,7 +9582,7 @@ int CSQLHelper::SanitizeCalendarData(uint64_t idx)
 			{
 				const float value = static_cast<float>(atof(row[1].c_str()));
 				const float price = static_cast<float>(atof(row[2].c_str()));
-				if (price != 0.0f && value > 0)
+				if (price > 0.0f && value > 0)
 					rates.push_back(price / (value / divider));
 			}
 
@@ -9183,13 +9599,15 @@ int CSQLHelper::SanitizeCalendarData(uint64_t idx)
 				bool bad;
 				if (value <= 0)
 					bad = true;
+				else if (price < 0.0f)
+					bad = false;  // negative prices (earned money at negative tariffs) are always valid
 				else if (use_iqr)
 				{
 					const float rate = price / (value / divider);
 					bad = (rate < fence_lo || rate > fence_hi);
 				}
 				else
-					bad = (std::abs(price) > (value / divider) * fallback_max_unit_rate);
+					bad = (price > (value / divider) * fallback_max_unit_rate);
 
 				if (!bad) continue;
 
@@ -9220,10 +9638,12 @@ int CSQLHelper::SanitizeCalendarData(uint64_t idx)
 
 						const float spread_rate = price / (total_value / divider);
 						bool spread_ok;
-						if (use_iqr)
+						if (price < 0.0f)
+							spread_ok = false;  // don't spread earned credits across dead days
+						else if (use_iqr)
 							spread_ok = (spread_rate >= fence_lo && spread_rate <= fence_hi);
 						else
-							spread_ok = (std::abs(price) <= (total_value / divider) * fallback_max_unit_rate);
+							spread_ok = (price <= (total_value / divider) * fallback_max_unit_rate);
 
 						if (spread_ok)
 						{
@@ -9691,7 +10111,7 @@ void CSQLHelper::DeleteDevices(const std::string& idx)
 #endif
 	{
 		//Avoid mutex deadlock here
-		std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+		std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 
 		char* errorMessage;
 		sqlite3_exec(m_dbase, "BEGIN TRANSACTION", nullptr, nullptr, &errorMessage);
@@ -9764,7 +10184,7 @@ void CSQLHelper::DeleteScenes(const std::string& idx)
 		return;
 	{
 		//Avoid mutex deadlock here
-		std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+		std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 
 		char* errorMessage;
 		sqlite3_exec(m_dbase, "BEGIN TRANSACTION", nullptr, nullptr, &errorMessage);
@@ -10267,7 +10687,7 @@ bool CSQLHelper::BackupDatabase(const std::string& OutputFile)
 	// Lightweight optimization — no VACUUM (too expensive for large databases
 	// and redundant since the backup API creates a compacted copy)
 	{
-		std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+		std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 		sqlite3_exec(m_dbase, "PRAGMA optimize;", nullptr, nullptr, nullptr);
 	}
 
@@ -10281,7 +10701,7 @@ bool CSQLHelper::BackupDatabase(const std::string& OutputFile)
 
 	// Initialize backup — must hold mutex while accessing m_dbase
 	{
-		std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+		std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 		pBackup = sqlite3_backup_init(pFile, "main", m_dbase, "main");
 	}
 
@@ -10299,7 +10719,7 @@ bool CSQLHelper::BackupDatabase(const std::string& OutputFile)
 	// Mutex is held only during each step, allowing other queries between steps.
 	do {
 		{
-			std::lock_guard<std::mutex> l(m_sqlQueryMutex);
+			std::lock_guard<std::timed_mutex> l(m_sqlQueryMutex);
 			rc = sqlite3_backup_step(pBackup, 256);
 		}
 
@@ -11246,7 +11666,8 @@ void CSQLHelper::SendUpdateInt(const std::string& Idx)
 
 void CSQLHelper::UpdateDeviceValue(const char* FieldName, const std::string& Value, const std::string& Idx)
 {
-	safe_query("UPDATE DeviceStatus SET %s='%s' , LastUpdate='%q' WHERE (ID == %s )", FieldName, Value.c_str(), TimeToString(nullptr, TF_DateTime).c_str(), Idx.c_str());
+	// Value is caller supplied and may legitimately contain quotes, so it has to be escaped (%q, not %s)
+	safe_query("UPDATE DeviceStatus SET %s='%q' , LastUpdate='%q' WHERE (ID == %s )", FieldName, Value.c_str(), TimeToString(nullptr, TF_DateTime).c_str(), Idx.c_str());
 	SendUpdateInt(Idx);
 }
 void CSQLHelper::UpdateDeviceValue(const char* FieldName, const int Value, const std::string& Idx)
@@ -11691,6 +12112,25 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 	if (divider == 0)
 		return false;
 
+	//When prices come from the internal meter tariffs, the logged Price column holds the usage
+	//tariff (T1/T2) active at log time, so returned energy (Value2/Value6) must be priced at the
+	//configured return tariffs (R1/R2). With a dynamic price device the logged market price
+	//applies to usage and return alike.
+	int iHP_E_Idx = 0;
+	GetPreferencesVar("HourIdxElectricityDevice", iHP_E_Idx);
+	const bool bUseReturnTariffs = (iHP_E_Idx == 0x98765);
+	float priceR1 = 0;
+	float priceR2 = 0;
+	if (bUseReturnTariffs)
+	{
+		int nValue = 0;
+		GetPreferencesVar("CostEnergyR1", nValue);
+		priceR1 = static_cast<float>(nValue) / 10000.0F;
+		nValue = 0;
+		GetPreferencesVar("CostEnergyR2", nValue);
+		priceR2 = static_cast<float>(nValue) / 10000.0F;
+	}
+
 	auto result = safe_query("SELECT Value1, Value2, Value3, Value4, Value5, Value6, Price FROM MultiMeter WHERE (DeviceRowID='%" PRIu64 "' AND Date>='%q' AND Date<='%q 00:00:00') ORDER BY Date ASC",
 		idx, szDateStart, szDateEnd);
 	if (result.empty())
@@ -11711,7 +12151,15 @@ bool CSQLHelper::CalcMultiMeterPrice(const uint64_t idx, const float divider, co
 			if (last_cntrs[ii] != (int64_t)-1)
 			{
 				int64_t total = cntrs[ii] - last_cntrs[ii];
-				total_price[ii] += ((static_cast<float>(total) / divider) * rec_price);
+				float rate = rec_price;
+				if (bUseReturnTariffs)
+				{
+					if (ii == 1) //Value2 = R1 return
+						rate = priceR1;
+					else if (ii == 5) //Value6 = R2 return
+						rate = priceR2;
+				}
+				total_price[ii] += ((static_cast<float>(total) / divider) * rate);
 				bResult = true;
 			}
 			last_cntrs[ii] = cntrs[ii];
@@ -12009,6 +12457,67 @@ bool CSQLHelper::CopyDashboardLayout(int userid, const std::string &srcid, const
 		"INSERT INTO DashboardLayouts (id, userid, name, isdefault, layout, created, updated) "
 		"VALUES ('%q', %d, '%q', 0, '%q', datetime('now','localtime'), datetime('now','localtime'))",
 		newid.c_str(), userid, newname.c_str(), layout_json.c_str());
+	return true;
+}
+
+bool CSQLHelper::DeleteUser(const std::string &idx)
+{
+	// Users.ID is an INTEGER PRIMARY KEY (a rowid alias), so SQLite can hand the same id
+	// out again to a later user. Remove every row keyed by this user's id before removing
+	// the user itself, so a newly created user does not silently inherit them.
+	safe_query("DELETE FROM SharedDevices WHERE (SharedUserID == '%q')", idx.c_str());
+	safe_query("DELETE FROM DashboardLayouts WHERE (userid == '%q')", idx.c_str());
+	CThemeSettings::DeleteForUser(static_cast<unsigned long>(std::strtoul(idx.c_str(), nullptr, 10)));
+	safe_query("DELETE FROM Users WHERE (ID == '%q')", idx.c_str());
+	return true;
+}
+
+std::vector<CSQLHelper::_tAccessToken> CSQLHelper::GetAccessTokens()
+{
+	std::vector<_tAccessToken> result;
+	auto rows = safe_query("SELECT ID, Name, Rights, Expiry, CreatedAt, LastUpdate FROM AccessTokens ORDER BY ID ASC");
+	for (const auto& row : rows)
+	{
+		_tAccessToken t;
+		t.ID = static_cast<unsigned long>(atol(row[0].c_str()));
+		t.Name = row[1];
+		t.Rights = atoi(row[2].c_str());
+		t.Expiry = static_cast<time_t>(atol(row[3].c_str()));
+		t.CreatedAt = row[4];
+		t.LastUpdate = row[5];
+		result.push_back(t);
+	}
+	return result;
+}
+
+bool CSQLHelper::GetAccessToken(unsigned long ID, _tAccessToken& token)
+{
+	auto rows = safe_query("SELECT ID, Name, Rights, Expiry, CreatedAt, LastUpdate FROM AccessTokens WHERE ID=%lu", ID);
+	if (rows.empty())
+		return false;
+	token.ID = static_cast<unsigned long>(atol(rows[0][0].c_str()));
+	token.Name = rows[0][1];
+	token.Rights = atoi(rows[0][2].c_str());
+	token.Expiry = static_cast<time_t>(atol(rows[0][3].c_str()));
+	token.CreatedAt = rows[0][4];
+	token.LastUpdate = rows[0][5];
+	return true;
+}
+
+bool CSQLHelper::CreateAccessToken(const std::string& name, int rights, time_t expiry, const std::string& tokenHash, unsigned long& outID)
+{
+	safe_query("INSERT INTO AccessTokens (Name, Rights, Expiry, TokenHash) VALUES ('%q', %d, %lld, '%q')",
+		name.c_str(), rights, static_cast<long long>(expiry), tokenHash.c_str());
+	auto rows = safe_query("SELECT last_insert_rowid()");
+	if (rows.empty() || rows[0][0].empty())
+		return false;
+	outID = static_cast<unsigned long>(atol(rows[0][0].c_str()));
+	return true;
+}
+
+bool CSQLHelper::DeleteAccessToken(unsigned long ID)
+{
+	safe_query("DELETE FROM AccessTokens WHERE ID=%lu", ID);
 	return true;
 }
 

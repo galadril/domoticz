@@ -133,10 +133,41 @@ namespace http
 			_log.Log(LOG_STATUS, "WebServer(%s) stopped", m_server_alias.c_str());
 		}
 
+		std::vector<std::string> CWebServer::ParseCorsOrigins(const std::string& sOrigins)
+		{
+			std::vector<std::string> result;
+			std::vector<std::string> strarray;
+			StringSplit(sOrigins, ";", strarray);
+			for (auto& str : strarray)
+			{
+				stdstring_trim(str);
+				while (!str.empty() && str.back() == '/')
+					str.pop_back();
+				if (!str.empty())
+					result.push_back(str);
+			}
+			return result;
+		}
+
 		bool CWebServer::StartServer(server_settings& settings, const std::string& serverpath, const bool bIgnoreUsernamePassword)
 		{
 			if (!settings.is_enabled())
 				return true;
+
+			// Which forwarded-client-address header (if any) we are allowed to trust.
+			// Only the configured family is ever read, so naming the wrong one silently
+			// loses the real client address; naming none means the peer address is used
+			// as-is, which is what a deployment without a reverse proxy wants.
+			// Defaults to X-Forwarded-For, the value this was hardcoded to before it
+			// became configurable.
+			int iProxyHeaderFamily = static_cast<int>(ProxyHeaderFamily::XForwardedFor);
+			m_sql.GetPreferencesVar("WebProxyHeaderFamily", iProxyHeaderFamily);
+			if ((iProxyHeaderFamily < static_cast<int>(ProxyHeaderFamily::None)) || (iProxyHeaderFamily > static_cast<int>(ProxyHeaderFamily::XRealIP)))
+			{
+				_log.Log(LOG_ERROR, "WebServer: Invalid proxy header family setting (%d), falling back to X-Forwarded-For", iProxyHeaderFamily);
+				iProxyHeaderFamily = static_cast<int>(ProxyHeaderFamily::XForwardedFor);
+			}
+			settings.trusted_proxy_header_family = static_cast<ProxyHeaderFamily>(iProxyHeaderFamily);
 
 			m_server_alias = (settings.is_secure() == true) ? "SSL" : "HTTP";
 
@@ -256,6 +287,14 @@ namespace http
 				for (const auto& str : strarray)
 					m_pWebEm->AddTrustedNetworks(str);
 			}
+
+			std::string sAllowedCorsOrigins;
+			int nCorsAllowTrusted = 0;
+			m_sql.GetPreferencesVar("WebAllowedCORSOrigins", sAllowedCorsOrigins);
+			m_sql.GetPreferencesVar("WebCORSAllowTrustedNetworks", nCorsAllowTrusted);
+			m_pWebEm->SetCorsPolicy(ParseCorsOrigins(sAllowedCorsOrigins), nCorsAllowTrusted != 0);
+			if (sAllowedCorsOrigins.find('*') != std::string::npos)
+				_log.Log(LOG_STATUS, "SECURITY RISK! CORS origin '*' is configured: every website can call the API from a browser on a trusted network! Restrict 'Allowed CORS origins' in Settings/Security to specific origins.");
 			if (bIgnoreUsernamePassword)
 			{
 				m_pWebEm->AddTrustedNetworks("0.0.0.0/0");	// IPv4
@@ -281,6 +320,7 @@ namespace http
 			}
 
 			m_pWebEm->RegisterPageCode("/mcp", [this](auto&& session, auto&& req, auto&& rep) { PostMcp(session, req, rep); }, false);
+			m_pWebEm->RegisterOptionsCode("/mcp", [this](auto&& session, auto&& req, auto&& rep) { OptionsMcp(session, req, rep); });
 
 			m_pWebEm->RegisterPageCode("/json.htm", [this](auto&& session, auto&& req, auto&& rep) { GetJSonPage(session, req, rep); });
 			m_pWebEm->RegisterPageCode("/alexa.htm", [this](auto&& session, auto&& req, auto&& rep) { GetAlexaPage(session, req, rep); });
@@ -356,6 +396,10 @@ namespace http
 			RegisterCommandCode("addapplication", [this](auto&& session, auto&& req, auto&& root) { Cmd_AddApplication(session, req, root); });
 			RegisterCommandCode("updateapplication", [this](auto&& session, auto&& req, auto&& root) { Cmd_UpdateApplication(session, req, root); });
 			RegisterCommandCode("deleteapplication", [this](auto&& session, auto&& req, auto&& root) { Cmd_DeleteApplication(session, req, root); });
+
+			RegisterCommandCode("getaccesstokens", [this](auto&& session, auto&& req, auto&& root) { Cmd_GetAccessTokens(session, req, root); });
+			RegisterCommandCode("createaccesstoken", [this](auto&& session, auto&& req, auto&& root) { Cmd_CreateAccessToken(session, req, root); });
+			RegisterCommandCode("deleteaccesstoken", [this](auto&& session, auto&& req, auto&& root) { Cmd_DeleteAccessToken(session, req, root); });
 
 			RegisterCommandCode("wolgetnodes", [this](auto&& session, auto&& req, auto&& root) { Cmd_WOLGetNodes(session, req, root); });
 			RegisterCommandCode("woladdnode", [this](auto&& session, auto&& req, auto&& root) { Cmd_WOLAddNode(session, req, root); });
@@ -574,6 +618,9 @@ namespace http
 			// Migrated RTypes to regular commands
 			RegisterCommandCode("getusers", [this](auto&& session, auto&& req, auto&& root) { Cmd_GetUsers(session, req, root); });
 			RegisterCommandCode("getsettings", [this](auto&& session, auto&& req, auto&& root) { Cmd_GetSettings(session, req, root); });
+			RegisterCommandCode("themesettings_get", [this](auto&& session, auto&& req, auto&& root) { Cmd_ThemeSettingsGet(session, req, root); });
+			RegisterCommandCode("themesettings_set", [this](auto&& session, auto&& req, auto&& root) { Cmd_ThemeSettingsSet(session, req, root); });
+			RegisterCommandCode("themesettings_setdefault", [this](auto&& session, auto&& req, auto&& root) { Cmd_ThemeSettingsSetDefault(session, req, root); });
 			RegisterCommandCode("getdevices", [this](auto&& session, auto&& req, auto&& root) { Cmd_GetDevices(session, req, root); });
 			RegisterCommandCode("gethardware", [this](auto&& session, auto&& req, auto&& root) { Cmd_GetHardware(session, req, root); });
 			RegisterCommandCode("events", [this](auto&& session, auto&& req, auto&& root) { Cmd_Events(session, req, root); });
@@ -854,7 +901,8 @@ namespace http
 			}
 			// Add 'Applications' as User with special privilege URIGHTS_CLIENTID
 			result.clear();
-			result = m_sql.safe_query("SELECT ID, Active, Public, Applicationname, Secret, Pemfile, RefreshExpire, SigningSecret, AcceptLegacyTokensUntil FROM Applications");
+			m_client_redirect_uris.clear();
+			result = m_sql.safe_query("SELECT ID, Active, Public, Applicationname, Secret, Pemfile, RefreshExpire, SigningSecret, AcceptLegacyTokensUntil, RedirectUris FROM Applications");
 			if (!result.empty())
 			{
 				for (const auto& sd : result)
@@ -870,8 +918,37 @@ namespace http
 						uint32_t refreshexpire = static_cast<uint32_t>(atol(sd[6].c_str()));
 						std::string signingsecret = sd[7];
 						time_t accept_legacy_until = static_cast<time_t>(atol(sd[8].c_str()));
-						AddUser(ID, applicationname, secret, "", "", URIGHTS_CLIENTID, bPublic, pemfile, refreshexpire, signingsecret, accept_legacy_until);
+						// Use asymmetric signing only when a PEM key file is actually configured
+						int useAsymmetric = (bPublic && !pemfile.empty()) ? 1 : 0;
+						AddUser(ID, applicationname, secret, "", "", URIGHTS_CLIENTID, useAsymmetric, pemfile, refreshexpire, signingsecret, accept_legacy_until);
+
+						std::vector<std::string> rawuris;
+						StringSplit(sd[9], "\n", rawuris);
+						std::vector<std::string> redirecturis;
+						for (auto& uri : rawuris)
+						{
+							stdreplace(uri, "\r", "");
+							stdstring_trim(uri);
+							if (!uri.empty())
+								redirecturis.push_back(uri);
+						}
+						m_client_redirect_uris[applicationname] = redirecturis;
 					}
+				}
+			}
+
+			// Register access tokens as synthetic users so JWT validation resolves "at:<ID>" subjects
+			{
+				auto tokens = m_sql.GetAccessTokens();
+				time_t now = time(nullptr);
+				for (const auto& t : tokens)
+				{
+					if (t.Expiry != 0 && t.Expiry < now)
+						continue; // Skip expired tokens
+					std::string username = "at:" + std::to_string(t.ID);
+					unsigned long syntheticID = 40000UL + t.ID;
+					m_pWebEm->AddUserPassword(syntheticID, username, "", "", "",
+						static_cast<_eUserRights>(t.Rights), 0, "", "", 0, "", 0);
 				}
 			}
 
@@ -2222,7 +2299,7 @@ namespace http
 						}
 						else if (switchtype == STYPE_Dimmer)
 						{
-							root["result"][ii]["TypeImg"] = "dimmer";
+							root["result"][ii]["TypeImg"] = "Dimmer";
 						}
 						else if (switchtype == STYPE_Motion)
 						{
@@ -2848,17 +2925,17 @@ namespace http
 							std::vector<std::string> sd2 = result2[0];
 							if (sd2[0].empty())
 							{
-								_log.Log(LOG_ERROR, "Empty Value in Meter table for device idx: '%q'", sd[0].c_str());
+								_log.Log(LOG_ERROR, "Empty Value in Meter table for device idx: '%s'", sd[0].c_str());
 								continue;
 							}
 							if (!is_number(sValue))
 							{
-								_log.Log(LOG_ERROR, "Invalid Number sValue: '%q' for device idx: '%q'", sValue.c_str(), sd[0].c_str());
+								_log.Log(LOG_ERROR, "Invalid Number sValue: '%s' for device idx: '%s'", sValue.c_str(), sd[0].c_str());
 								continue;
 							}
 							if (!is_number(sd2[0]))
 							{
-								_log.Log(LOG_ERROR, "Invalid Number value: '%q' for device idx: '%q'", sd2[0].c_str(), sd[0].c_str());
+								_log.Log(LOG_ERROR, "Invalid Number value: '%s' for device idx: '%s'", sd2[0].c_str(), sd[0].c_str());
 								continue;
 							}
 							int64_t total_first = std::stoll(sd2[0]);
@@ -3675,6 +3752,7 @@ namespace http
 							root["result"][ii]["TypeImg"] = "text";
 							root["result"][ii]["HaveTimeout"] = false;
 							root["result"][ii]["ShowNotifications"] = false;
+							root["result"][ii]["ShowIcon"] = (options.count("ShowIcon") && options.at("ShowIcon") == "0") ? "0" : "1";
 						}
 						else if (dSubType == sTypeAlert)
 						{
@@ -3849,17 +3927,17 @@ namespace http
 
 								if (sd2[0].empty())
 								{
-									_log.Log(LOG_ERROR, "Empty Value in Meter table for device idx: '%q'", sd[0].c_str());
+									_log.Log(LOG_ERROR, "Empty Value in Meter table for device idx: '%s'", sd[0].c_str());
 									continue;
 								}
 								if (!is_number(sValue))
 								{
-									_log.Log(LOG_ERROR, "Invalid Number sValue: '%q' for device idx: '%q'", sValue.c_str(), sd[0].c_str());
+									_log.Log(LOG_ERROR, "Invalid Number sValue: '%s' for device idx: '%s'", sValue.c_str(), sd[0].c_str());
 									continue;
 								}
 								if (!is_number(sd2[0]))
 								{
-									_log.Log(LOG_ERROR, "Invalid Number value: '%q' for device idx: '%q'", sd2[0].c_str(), sd[0].c_str());
+									_log.Log(LOG_ERROR, "Invalid Number value: '%s' for device idx: '%s'", sd2[0].c_str(), sd[0].c_str());
 									continue;
 								}
 
@@ -4554,6 +4632,30 @@ namespace http
 			std::string rtype = request::findValue(&req, "type");
 			if (rtype == "command")
 			{
+				// Access token: verify still exists and not expired before dispatching command
+				if (session.username.size() > 3 && session.username.substr(0, 3) == "at:")
+				{
+					unsigned long tokenID = static_cast<unsigned long>(atol(session.username.c_str() + 3));
+					CSQLHelper::_tAccessToken at;
+					if (!m_sql.GetAccessToken(tokenID, at))
+					{
+						session.reply_status = reply::forbidden;
+						reply::set_content(&rep, root.toStyledString());
+						rep.status = static_cast<http::server::reply::status_type>(session.reply_status);
+						return;
+					}
+					time_t now = time(nullptr);
+					if (at.Expiry != 0 && at.Expiry < now)
+					{
+						m_sql.DeleteAccessToken(tokenID);
+						LoadUsers();
+						session.reply_status = reply::forbidden;
+						reply::set_content(&rep, root.toStyledString());
+						rep.status = static_cast<http::server::reply::status_type>(session.reply_status);
+						return;
+					}
+					m_sql.safe_query("UPDATE AccessTokens SET LastUpdate=datetime('now','localtime') WHERE ID=%lu", tokenID);
+				}
 				std::string cparam = request::findValue(&req, "param");
 				if (!cparam.empty())
 				{

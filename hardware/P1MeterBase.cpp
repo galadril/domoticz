@@ -229,7 +229,6 @@ void P1MeterBase::Init()
 	m_linecount = 0;
 	m_exclmarkfound = 0;
 	m_CRfound = 0;
-	m_bufferpos = 0;
 	m_lastgasusage = 0;
 	m_lastSharedSendGas = 0;
 	m_lastSendMBusDevice = 0;
@@ -304,7 +303,9 @@ void P1MeterBase::Init()
 		m_avr_calculated[ii].delivery_cntr = GetKwhMeter(0, 4 + ii, bExists);
 	}
 
-	memset(&m_buffer, 0, sizeof(m_buffer));
+	m_runningCRC = 0;
+	m_crcDone = false;
+	m_msgLen = 0;
 	memset(&l_buffer, 0, sizeof(l_buffer));
 
 	memset(&m_power, 0, sizeof(m_power));
@@ -641,8 +642,21 @@ bool P1MeterBase::MatchLine()
 				} //if (difftime(atime, m_lastUpdateTime) >= m_ratelimit)
 
 #define kWh_Update_Interval 10
+				// Integrate per-phase energy using the ACTUAL elapsed time since the previous
+				// accumulation instead of assuming exactly kWh_Update_Interval seconds passed.
+				// With an irregular telegram cadence (gateway hiccups, high ratelimit) the fixed
+				// crediting systematically under-counts. A long data gap is capped so a stale
+				// average is not extrapolated across it.
+				// Note: these counters integrate per-phase GROSS power (OBIS 21/41/61.7.0 and
+				// 22/42/62.7.0). Meters net simultaneous cross-phase import/export in their
+				// 1.8.x/2.8.x registers (e.g. solar/battery exporting on one phase while another
+				// phase imports), so these calculated totals legitimately read higher than the
+				// meter registers on installations with per-phase generation.
 				if (difftime(atime, m_lastSendCalculated) >= kWh_Update_Interval)
 				{
+					double elapsed = difftime(atime, m_lastSendCalculated);
+					if (elapsed > 4 * kWh_Update_Interval)
+						elapsed = 4 * kWh_Update_Interval; // data gap: credit at most 40 seconds
 					m_lastSendCalculated = atime;
 
 					for (int iif = 0; iif < 3; iif++)
@@ -651,15 +665,18 @@ bool P1MeterBase::MatchLine()
 						float avr_deliv = m_avr_calculated[iif].Get_Delivery_Avr();
 						m_avr_calculated[iif].ResetTotals();
 
+						// An average of exactly -1 means the phase never reported (the -1 init
+						// value was accumulated every telegram, e.g. a single phase meter):
+						// skip it, or the counter would slowly decay by -1 W worth of energy.
 						if (avr_usage != -1)
 						{
-							m_avr_calculated[iif].usage_cntr += (avr_usage * kWh_Update_Interval / 3600.0);
+							m_avr_calculated[iif].usage_cntr += (avr_usage * elapsed / 3600.0);
 							if (m_avr_calculated[iif].usage_cntr > 0)
 								SendKwhMeter(0, 1 + iif, 255, round(avr_usage), m_avr_calculated[iif].usage_cntr * 0.001, std_format("kWh Usage L%d (Calculated)", 1 + iif));
 						}
 						if (avr_deliv != -1)
 						{
-							m_avr_calculated[iif].delivery_cntr += (avr_deliv * kWh_Update_Interval / 3600.0);
+							m_avr_calculated[iif].delivery_cntr += (avr_deliv * elapsed / 3600.0);
 							if (m_avr_calculated[iif].delivery_cntr > 0)
 								SendKwhMeter(0, 4 + iif, 255, round(avr_deliv), m_avr_calculated[iif].delivery_cntr * 0.001, std_format("kWh Delivery L%d (Calculated)", 1 + iif));
 						}
@@ -727,14 +744,14 @@ bool P1MeterBase::MatchLine()
 					* Electricity meter 02h
 					* Gas meter 03h
 					* Heat meter 04h
-					* Warm water meter (30°C ... 90°C) 06h
+					* Warm water meter (30ï¿½C ... 90ï¿½C) 06h
 					* Water meter 07h
 					* Heat Cost Allocator 08h
 					* Cooling meter (Volume measured at return temperature: outlet) 0Ah
 					* Cooling meter (Volume measured at flow temperature: inlet) 0Bh
 					* Heat meter (Volume measured at flow temperature: inlet) 0Ch
 					* Combined Heat / Cooling meter 0Dh
-					* Hot water meter (= 90°C) 15h
+					* Hot water meter (= 90ï¿½C) 15h
 					* Cold water meter a 16h
 					* Breaker (electricity) 20h
 					* Valve (gas or water) 21h
@@ -777,16 +794,19 @@ bool P1MeterBase::MatchLine()
 					if ((l_buffer[8] & 0xFE) == 0x30)
 					{
 						// map tariff IDs 0 (Lux) and 1 (Bel, Nld) both to powerusage1
-						if (!m_power.powerusage1 || m_p1version >= 4)
+						// powerusageX are cumulative Wh counters (meter totals, not instantaneous Watts).
+						// ESMR 4/5: allow up to 200 kWh jump to survive ~24 h reconnection gaps; rejects corrupt zero-readings.
+						// Unsigned underflow when temp_usage < previous â†’ result wraps to huge value â†’ correctly rejected.
+						if (!m_power.powerusage1)
 							m_power.powerusage1 = temp_usage;
-						else if (temp_usage - m_power.powerusage1 < P1MAXPHASEPOWER)
+						else if (temp_usage - m_power.powerusage1 < (m_p1version >= 4 ? 200000UL : P1MAXPHASEPOWER))
 							m_power.powerusage1 = temp_usage;
 					}
 					else if (l_buffer[8] == 0x32)
 					{
-						if (!m_power.powerusage2 || m_p1version >= 4)
+						if (!m_power.powerusage2)
 							m_power.powerusage2 = temp_usage;
-						else if (temp_usage - m_power.powerusage2 < P1MAXPHASEPOWER)
+						else if (temp_usage - m_power.powerusage2 < (m_p1version >= 4 ? 200000UL : P1MAXPHASEPOWER))
 							m_power.powerusage2 = temp_usage;
 					}
 					break;
@@ -795,16 +815,17 @@ bool P1MeterBase::MatchLine()
 					if ((l_buffer[8] & 0xFE) == 0x30)
 					{
 						// map tariff IDs 0 (Lux) and 1 (Bel, Nld) both to powerdeliv1
-						if (!m_power.powerdeliv1 || m_p1version >= 4)
+						// powerdelivX are cumulative Wh counters. Same guard as powerusageX above.
+						if (!m_power.powerdeliv1)
 							m_power.powerdeliv1 = temp_usage;
-						else if (temp_usage - m_power.powerdeliv1 < P1MAXPHASEPOWER)
+						else if (temp_usage - m_power.powerdeliv1 < (m_p1version >= 4 ? 200000UL : P1MAXPHASEPOWER))
 							m_power.powerdeliv1 = temp_usage;
 					}
 					else if (l_buffer[8] == 0x32)
 					{
-						if (!m_power.powerdeliv2 || m_p1version >= 4)
+						if (!m_power.powerdeliv2)
 							m_power.powerdeliv2 = temp_usage;
-						else if (temp_usage - m_power.powerdeliv2 < P1MAXPHASEPOWER)
+						else if (temp_usage - m_power.powerdeliv2 < (m_p1version >= 4 ? 200000UL : P1MAXPHASEPOWER))
 							m_power.powerdeliv2 = temp_usage;
 					}
 					break;
@@ -1040,17 +1061,12 @@ bool P1MeterBase::CheckCRC()
 	crc_str[4] = 0;
 	uint16_t m_crc16 = (uint16_t)strtoul(crc_str, nullptr, 16);
 
-	// calculate CRC
-	uint16_t crc = 0;
-	for (int ii = 0; ii < m_bufferpos; ii++)
-	{
-		crc = (crc >> 8) ^ p1_crc_16[(crc ^ m_buffer[ii]) & 0xFF];
-	}
-	if (crc != m_crc16)
+	// CRC was computed incrementally during parsing â€” no need to loop again
+	if (m_runningCRC != m_crc16)
 	{
 		Log(LOG_NORM, "Dismiss incoming - CRC failed");
 	}
-	return (crc == m_crc16);
+	return (m_runningCRC == m_crc16);
 }
 
 void P1MeterBase::SendTextSensorWhenDifferent(const int ID, const int value, int& cmp_value, const std::string& Name)
@@ -1260,7 +1276,9 @@ void P1MeterBase::ParseP1Data(const uint8_t* pDataIn, const int LenIn, const boo
 		ii++;
 	}
 
-	// re enable reading pData when a new message starts, empty buffers
+	// New telegram detected ('/'). If the previous telegram's '!' line is still pending in l_buffer
+	// (e.g. data arrived split across two calls), validate it against m_runningCRC before resetting
+	// state â€” m_runningCRC still holds the previous message's accumulated value at this point.
 	if (pData[ii] == 0x2f)
 	{
 		if ((l_buffer[0] == 0x21) && !l_exclmarkfound && (m_linecount > 0))
@@ -1274,46 +1292,27 @@ void P1MeterBase::ParseP1Data(const uint8_t* pDataIn, const int LenIn, const boo
 		}
 		m_linecount = 1;
 		l_bufferpos = 0;
-		m_bufferpos = 0;
+		m_runningCRC = 0;
+		m_crcDone = false;
+		m_msgLen = 0;
 		m_exclmarkfound = 0;
 		m_p1_mbus_type = P1MBusType::deviceType_Unknown;
 	}
 
-	// assemble complete message in message buffer
-	while ((ii < Len) && (m_linecount > 0) && (!m_exclmarkfound) && (m_bufferpos < sizeof(m_buffer)))
-	{
-		const unsigned char c = pData[ii];
-		m_buffer[m_bufferpos] = c;
-		m_bufferpos++;
-		if (c == 0x21)
-		{
-			// stop reading at exclamation mark (do not include CRC)
-			ii = Len;
-			m_exclmarkfound = 1;
-		}
-		else {
-			ii++;
-		}
-	}
-
-	if (m_bufferpos == sizeof(m_buffer))
-	{
-		// discard oversized message
-		if ((Len > 600) || (pData[0] == 0x21))
-		{
-			// 400 is an arbitrary chosen number to differentiate between full messages and single line commits
-			Log(LOG_NORM, "Dismiss incoming - message oversized");
-		}
-		m_linecount = 0;
-		return;
-	}
-
-	// read pData, ignore/stop if there is a message validation failure
-	ii = 0;
+	// single pass: parse lines and accumulate CRC simultaneously
 	while ((ii < Len) && (m_linecount > 0))
 	{
 		const unsigned char c = pData[ii];
 		ii++;
+
+		// Accumulate CRC over every byte from '/' up to and including '!'
+		if (!disable_crc && !m_crcDone)
+		{
+			m_runningCRC = (m_runningCRC >> 8) ^ p1_crc_16[(m_runningCRC ^ c) & 0xFF];
+			if (c == 0x21)
+				m_crcDone = true;
+		}
+
 		if (c == 0x0d)
 		{
 			m_CRfound = 1;
@@ -1344,10 +1343,22 @@ void P1MeterBase::ParseP1Data(const uint8_t* pDataIn, const int LenIn, const boo
 			}
 			l_bufferpos = 0;
 		}
-		else if (l_bufferpos < sizeof(l_buffer))
+		else
 		{
-			l_buffer[l_bufferpos] = c;
-			l_bufferpos++;
+			m_msgLen++;
+			if (m_msgLen > 2000)
+			{
+				// discard oversized message
+				if ((Len > 600) || (pData[0] == 0x21))
+					Log(LOG_NORM, "Dismiss incoming - message oversized");
+				m_linecount = 0;
+				return;
+			}
+			if (l_bufferpos < sizeof(l_buffer))
+			{
+				l_buffer[l_bufferpos] = c;
+				l_bufferpos++;
+			}
 		}
 	}
 }

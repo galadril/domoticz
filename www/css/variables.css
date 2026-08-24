@@ -59,6 +59,13 @@
   --dz-table-odd-text:             #333;
   --dz-table-even-bg:              #ffffff;
   --dz-table-even-text:            #333;
+
+  --dz-remote-face-start:          #cbcccb;
+  --dz-remote-face-end:            #989898;
+  --dz-remote-edge:                #393a39;
+  --dz-remote-symbol:              #393a39;
+  --dz-remote-hover:               #289fe3;
+  --dz-remote-disabled:            #2e2e2e;
 }
 
 /* --- Shared table/tbody block display --- */
@@ -106,6 +113,7 @@ body table#itemtablesmalltrippleicon tr > * {
 	display: block;
 	padding: 0;
 	margin: 0;
+	overflow-wrap: break-word;
 }
 
 /* --- Shared tbody tr row --- */
@@ -171,6 +179,9 @@ body table#itemtablesmalltrippleicon tr td:first-child {
 	font-family: Arial, Helvetica, sans-serif;
 	font-size: var(--dz-widget-name-font-size);
 	white-space: nowrap;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	border-width: 1px 1px 1px 1px;
 	border-color: var(--dz-widget-name-border);
 	border-style: solid;

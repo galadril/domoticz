@@ -43,17 +43,41 @@ private:
 		int    levelMaxLevel = 254; // CLUSTER_LEVEL_CONTROL attr 3
 		bool   occupied   = false; bool hasOccupancy = false;
 		bool   contact    = false; bool hasContact   = false;
+		int    deviceType = 0;   bool hasDeviceType = false; // Descriptor DeviceTypeList (Contact/Leak/Rain/Freeze detection)
+		bool   smokeAlarm = false; bool hasSmoke     = false;
+		bool   coAlarm    = false; bool hasCOAlarm   = false;
+		int    airQuality = 0;   bool hasAirQuality = false;
 		int    co2_ppm    = 0;   bool hasCO2       = false;
 		float  co_ppm     = 0;   bool hasCO        = false;
 		float  no2_ppm    = 0;   bool hasNO2       = false;
 		float  pm25_ugm3  = 0;   bool hasPM25      = false;
 		float  pm10_ugm3  = 0;   bool hasPM10      = false;
+		float  pm1_ugm3   = 0;   bool hasPM1       = false;
+		float  tvoc_ppb   = 0;   bool hasTVOC      = false;
+		float  ozone_ppb  = 0;   bool hasOzone     = false;
+		float  formaldehyde_ppb = 0; bool hasFormaldehyde = false;
+		float  radon_Bqm3 = 0;   bool hasRadon     = false;
 		float  flow_lpm   = 0;   bool hasFlow      = false;
 		bool   locked     = false; bool hasLock     = false;
 		double blind_pct  = 0;   bool hasBlind     = false;
 		bool   switch_on  = false; bool hasSwitch  = false;
 		int    systemMode    = 0; bool hasSystemMode    = false;
 		int    ctrlSeqOp     = 0; bool hasCtrlSeqOp     = false;
+		// rechargeable batteries
+		int    rechargeable_battery_pct = 200;  int rechargeable_battery_charge_state = 0; bool hasRechargeableBattery = false;
+		// rvc cluster
+		int	   rvc_CurrentRunMode = 0; bool hasRvc_RunMode = false;
+		int    rvc_IdleRunMode = -1; int rvc_CleanRunMode = -1;
+		struct rvc_RunModeEntry { std::string label; int mode; std::vector<int> RunModeTags; };
+		std::vector<rvc_RunModeEntry> rvc_RunModeEntries;
+		int	   rvc_CurrentCleanMode	= 0; bool hasRvc_CleanMode = false;
+		struct rvc_CleanModeEntry { std::string label; int mode; };
+		std::vector<rvc_CleanModeEntry> rvc_CleanModeEntries;
+		int	   rvc_OperationalState = 0; int rvc_OperationalError=0; bool hasRvc_OperationalState = false;
+		// service areas
+		int	   currentArea = 0; bool hasAreas = false;
+		struct areaEntry { uint32_t areaId=0; uint32_t mapId=0; std::string locationName; uint16_t floorNumber=0; int areaType=0; };
+		std::vector<areaEntry> areaEntries;
 		// Thermostat absolute setpoint limits (°C)
 		float  minHeatSetpoint_C = 5.0f;
 		float  maxHeatSetpoint_C = 30.0f;
@@ -140,15 +164,19 @@ private:
 	void HandleResult(const Json::Value& msg);
 	void HandleEvent(const Json::Value& msg);
 	void HandleNode(const Json::Value& nodeData);
+	void HandleNodeEvent(const Json::Value& node_event);
 	void HandleAttributeUpdate(const Json::Value& data);
 	void _DetectAndSend(int nodeId, int endpointId);
 	void _DetectAndSendNode(int nodeId);
 	void SendGeneralSwitchInt(int domoticzID, int unit, int battery, int value, int level,
 	                          const std::string& label, _eSwitchType switchType);
 	void _ApplySwitchTypeOnCreate(int domoticzID, int unit, bool wasNew, _eSwitchType switchType);
+	void _SendAlertSensorFullId(int domoticzID, int unit, int battery, int alertLevel, const std::string& text, const std::string& label);
 	void ApplyAttributeToState(int cluster_id, int attr_id, const Json::Value& v, EndpointState& state);
 	void ApplyNodeMetadata(int cluster_id, int attr_id, const Json::Value& v, NodeState& node);
 	std::string ExtractLabel(const Json::Value& endpointAttrs, int nodeId, int endpointId) const;
+	std::string Getrvc_OperationalStateLabel(int OperationalState);
+	std::string Getrvc_OperationalErrorLabel(int OperationalError);
 	void Do_Work();
 
 	std::string  m_serverAddress;
