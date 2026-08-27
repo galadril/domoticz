@@ -925,6 +925,47 @@ namespace WebAssetFetch
 			}
 			return false;
 		}
+
+		// Puts every already-committed file in a batch back to what it was, collecting the
+		// names it could not put back. A rollback that itself fails leaves the library on a
+		// mix of old and new files, so those names must not be swallowed.
+		void RollBackCommitted(const std::vector<std::pair<std::string, std::string>>& committed, std::vector<std::string>& unrestored)
+		{
+			for (const auto& cd : committed)
+			{
+				if (!RestoreWebAssetFile(cd.first, cd.second))
+					unrestored.push_back(cd.first);
+			}
+		}
+
+		// The backups are deliberately left in place when this reports something, so the
+		// files can still be recovered by hand.
+		void ReportUnrestored(const std::vector<std::string>& unrestored, std::string& szError)
+		{
+			if (unrestored.empty())
+				return;
+
+			std::string szNames;
+			for (const auto& szUnrestored : unrestored)
+			{
+				if (!szNames.empty())
+					szNames += ", ";
+				szNames += szUnrestored;
+			}
+			_log.Log(LOG_ERROR, "%s: could not roll back %s; the backup files have been kept", LOGTAG, szNames.c_str());
+			szError += ", and " + szNames + " could not be rolled back";
+		}
+
+		// safe_query cannot report a failed write, so the row is read back instead. Without
+		// the right source URL and companion list a later refresh or delete would act on the
+		// wrong set of files, which is why a mismatch has to fail the whole install.
+		bool StoredMetadataMatches(const std::string& szName, const std::string& szURL, const std::string& szCompanions)
+		{
+			auto result = m_sql.safe_query("SELECT SourceURL, Companions FROM WebAssets WHERE (Name=='%q')", szName.c_str());
+			if (result.empty())
+				return false;
+			return ((result[0][0] == szURL) && (result[0][1] == szCompanions));
+		}
 	} // namespace
 
 	bool Install(const std::string& szName, const std::string& szURL, const std::string& szTitle, std::string& szError)
@@ -1066,6 +1107,7 @@ namespace WebAssetFetch
 
 		bool bCommitOk = true;
 		std::vector<std::pair<std::string, std::string>> committed; // name -> backup file (empty if none existed)
+		std::vector<std::string> unrestored;
 		for (const auto& sd : staged)
 		{
 			std::string szBackupFile;
@@ -1078,7 +1120,8 @@ namespace WebAssetFetch
 			if (!CommitWebAssetFile(sd.first, sd.second, LOGTAG))
 			{
 				// Nothing was replaced for this name, put the original straight back.
-				RestoreWebAssetFile(sd.first, szBackupFile);
+				if (!RestoreWebAssetFile(sd.first, szBackupFile))
+					unrestored.push_back(sd.first);
 				szError = "Could not store " + sd.first;
 				bCommitOk = false;
 				break;
@@ -1090,14 +1133,12 @@ namespace WebAssetFetch
 			// Roll every already-committed file in this batch back to what it was before,
 			// so a failure part way through leaves the library exactly as it was rather
 			// than on a mix of old and new files.
-			for (const auto& cd : committed)
-				RestoreWebAssetFile(cd.first, cd.second);
+			RollBackCommitted(committed, unrestored);
 			for (const auto& sd : staged)
 				DiscardStagedWebAssetFile(sd.second);
+			ReportUnrestored(unrestored, szError);
 			return false;
 		}
-		for (const auto& cd : committed)
-			DiscardWebAssetBackup(cd.second);
 
 		std::string szCompanions;
 		for (const auto& asset : ctx.assets)
@@ -1121,7 +1162,22 @@ namespace WebAssetFetch
 			// Refreshing from the stored source URL sends no title, that must not blank it.
 			if (!szCleanTitle.empty())
 				m_sql.safe_query("UPDATE WebAssets SET Title='%q' WHERE (ID==%d)", szCleanTitle.c_str(), atoi(existing[0][0].c_str()));
+		}
 
+		// Only once the metadata is known to be correct is any of this irreversible: the
+		// backups are still held, so a failed write can put the previous files back rather
+		// than leaving new files owned by stale metadata.
+		if (!StoredMetadataMatches(szName, szURL, szCompanions))
+		{
+			_log.Log(LOG_ERROR, "%s: could not record metadata for '%s', rolling the files back", LOGTAG, szName.c_str());
+			RollBackCommitted(committed, unrestored);
+			szError = "Could not record " + szName;
+			ReportUnrestored(unrestored, szError);
+			return false;
+		}
+
+		if (bIsUpdate)
+		{
 			for (const auto& szOld : previous)
 			{
 				if (ctx.storedNames.count(szOld) != 0)
@@ -1137,6 +1193,9 @@ namespace WebAssetFetch
 				RemoveWebAssetFile(szOld);
 			}
 		}
+
+		for (const auto& cd : committed)
+			DiscardWebAssetBackup(cd.second);
 
 		_log.Log(LOG_STATUS, "%s: stored '%s' with %d companion file(s), %d bytes", LOGTAG, szName.c_str(), static_cast<int>(ctx.assets.size()), static_cast<int>(ctx.totalSize));
 		return true;
