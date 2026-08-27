@@ -802,7 +802,36 @@ namespace WebAssetFetch
 					break;
 				}
 				const size_t iOpen = iFound + 4;
-				const size_t iClose = szCss.find(')', iOpen);
+				// A quoted url() value may legally contain ')': icon sets built on inline SVG
+				// masks carry a nested url(#clip...) inside the data URI. Taking the first ')'
+				// would cut the value in half, so for a quoted value the paren is looked for
+				// after the closing quote instead.
+				size_t iValue = iOpen;
+				while ((iValue < szCss.size()) && (isspace(static_cast<unsigned char>(szCss[iValue])) != 0))
+					iValue++;
+
+				size_t iClose = std::string::npos;
+				if ((iValue < szCss.size()) && ((szCss[iValue] == '"') || (szCss[iValue] == '\'')))
+				{
+					const char cOpenQuote = szCss[iValue];
+					size_t iScan = iValue + 1;
+					while (iScan < szCss.size())
+					{
+						if (szCss[iScan] == '\\')
+						{
+							iScan += 2;
+							continue;
+						}
+						if (szCss[iScan] == cOpenQuote)
+							break;
+						iScan++;
+					}
+					if (iScan < szCss.size())
+						iClose = szCss.find(')', iScan + 1);
+				}
+				else
+					iClose = szCss.find(')', iOpen);
+
 				if (iClose == std::string::npos)
 				{
 					szOut.append(szCss, iPos, std::string::npos);
