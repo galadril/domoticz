@@ -363,6 +363,14 @@ define(['app', 'icons/dzIconService'], function (app) {
         }
 
         function hasGlyphContent(rule) {
+            // Not every icon set is a font. Sets like Iconoir ship no @font-face at all and
+            // draw each icon as an SVG mask, so they declare mask-image and never a codepoint;
+            // requiring content would enumerate nothing for them. Utility classes declare
+            // neither, which is what this test is really filtering out.
+            if (hasMaskImage(rule)) {
+                return true;
+            }
+
             var value = (readProperty(rule, 'content') || '').trim();
 
             if (!value || value === 'none' || value === 'normal') {
@@ -371,6 +379,11 @@ define(['app', 'icons/dzIconService'], function (app) {
 
             // content:"" declares the property without a codepoint.
             return !!value.replace(/^(['"])([\s\S]*)\1$/, '$2').trim();
+        }
+
+        function hasMaskImage(rule) {
+            var value = (readProperty(rule, 'mask-image') || readProperty(rule, '-webkit-mask-image') || '').trim();
+            return !!value && (value !== 'none');
         }
 
         // Libraries differ in where they hang the codepoint: on a lone class (.ri-home-line:before)
