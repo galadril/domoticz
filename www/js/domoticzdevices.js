@@ -73,6 +73,16 @@ function getIconService() {
         // before they arrive get the legacy image. Waiting for the next refresh would not
         // help, that one only returns the devices that changed, so redraw here instead.
         dzIconServiceRef.preloadBuiltinIcons().then(redrawStoredDevices);
+
+        // Settings > Icon style decides whether a type resolves to a glyph at all, and
+        // resolveIcon() reads it once, when the device is built. The setting arrives with
+        // the server config, which can land after the first devices are drawn, and a user
+        // can change it without leaving the page; either way the drawn icons are stale
+        // until they are rebuilt.
+        var rootScope = injector.get('$rootScope');
+        rootScope.$watch(
+            function () { return rootScope.config ? rootScope.config.IconStyle : undefined; },
+            function (now, before) { if (now !== before) redrawStoredDevices(); });
     }
     catch (err) {
         return null;
