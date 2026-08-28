@@ -1606,10 +1606,17 @@ namespace http
 		// field names declared as password fields. The password attribute is matched case-insensitively
 		// ("true"/"TRUE"/"1") so a manifest typo does not silently expose a secret. Pure: operates on
 		// the manifest XML string, no I/O. keyOut is empty when the manifest has no key attribute.
-		static void ParsePluginManifest(const std::string &manifestXml, std::string &keyOut, std::set<std::string> &passwordFieldsOut)
+		struct _tPluginSettingsFields
+		{
+			std::set<std::string> passwordFields; // params declared password="true"
+			std::set<std::string> allFields;      // every param the manifest declares
+		};
+
+		static void ParsePluginManifest(const std::string &manifestXml, std::string &keyOut, _tPluginSettingsFields &fieldsOut)
 		{
 			keyOut.clear();
-			passwordFieldsOut.clear();
+			fieldsOut.passwordFields.clear();
+			fieldsOut.allFields.clear();
 			TiXmlDocument xmlDoc;
 			xmlDoc.Parse(manifestXml.c_str());
 			if (xmlDoc.Error())
@@ -1636,8 +1643,11 @@ namespace http
 			};
 			auto checkParam = [&](TiXmlElement *pEle) {
 				const char *pField = pEle->Attribute("field");
-				if (pField && isPasswordAttr(pEle->Attribute("password")))
-					passwordFieldsOut.insert(pField);
+				if (!pField)
+					return;
+				fieldsOut.allFields.insert(pField);
+				if (isPasswordAttr(pEle->Attribute("password")))
+					fieldsOut.passwordFields.insert(pField);
 			};
 			for (TiXmlNode *pChild = pParamsNode->FirstChild(); pChild; pChild = pChild->NextSibling())
 			{
@@ -1663,16 +1673,16 @@ namespace http
 		// column) to its set of password field names. GetManifest() is keyed by plugin DIRECTORY, not by
 		// the key attribute, so it must be walked and re-keyed. Only plugins that declare at least one
 		// password field appear.
-		static std::map<std::string, std::set<std::string>> BuildPluginPasswordFieldsByKey()
+		static std::map<std::string, _tPluginSettingsFields> BuildPluginSettingsFieldsByKey()
 		{
-			std::map<std::string, std::set<std::string>> byKey;
+			std::map<std::string, _tPluginSettingsFields> byKey;
 			Plugins::CPluginSystem pluginSystem;
 			for (const auto &manifest : *pluginSystem.GetManifest())
 			{
 				std::string key;
-				std::set<std::string> fields;
+				_tPluginSettingsFields fields;
 				ParsePluginManifest(manifest.second, key, fields);
-				if (!key.empty() && !fields.empty())
+				if (!key.empty() && !fields.allFields.empty())
 					byKey[key] = fields;
 			}
 			return byKey;
@@ -1992,13 +2002,13 @@ namespace http
 					{
 						// Preserve custom password fields left blank on save ("leave blank to keep").
 						// Extra holds the plugin key; a password field submitted empty keeps its stored value.
-						std::map<std::string, std::set<std::string>> pluginPasswordFields = BuildPluginPasswordFieldsByKey();
-						auto itPwd = pluginPasswordFields.find(extra);
-						if (itPwd != pluginPasswordFields.end() && !itPwd->second.empty())
+						std::map<std::string, _tPluginSettingsFields> pluginFields = BuildPluginSettingsFieldsByKey();
+						auto itPwd = pluginFields.find(extra);
+						if (itPwd != pluginFields.end() && !itPwd->second.passwordFields.empty())
 						{
 							std::vector<std::vector<std::string>> storedRes = m_sql.safe_query("SELECT Settings FROM Hardware WHERE ID=%q", idx.c_str());
 							std::string storedSettings = storedRes.empty() ? "" : storedRes[0][0];
-							settings = MergePluginSettingsPreservePasswords(settings, storedSettings, itPwd->second);
+							settings = MergePluginSettingsPreservePasswords(settings, storedSettings, itPwd->second.passwordFields);
 						}
 					}
 #endif
@@ -3104,6 +3114,10 @@ namespace http
 			m_sql.GetPreferencesVar("MobileType", nValue);
 			root["MobileType"] = nValue;
 
+			nValue = 0;
+			m_sql.GetPreferencesVar("IconStyle", nValue);
+			root["IconStyle"] = nValue; // 0 = classic image icons, 1 = Font Awesome glyphs
+
 			nValue = 1;
 			m_sql.GetPreferencesVar("5MinuteHistoryDays", nValue);
 			root["FiveMinuteHistoryDays"] = nValue;
@@ -4176,6 +4190,14 @@ namespace http
 				m_pWebEm->SetWebTheme(SelectedTheme);
 				cntSettings++;
 
+				// Icon style: 0 = the classic image icons (default), 1 = Font Awesome glyphs
+				std::string sIconStyle = request::findValue(&req, "IconStyle");
+				if (!sIconStyle.empty())
+				{
+					m_sql.UpdatePreferencesVar("IconStyle", (sIconStyle == "1") ? 1 : 0);
+					cntSettings++;
+				}
+
 				//Update the Max kWh value
 				rnvalue = 6000;
 				if (m_sql.GetPreferencesVar("MaxElectricPower", rnvalue))
@@ -4710,13 +4732,13 @@ namespace http
 #ifdef ENABLE_PYTHON
 				// Map plugin key -> password field names, built once, but only when the result actually
 				// contains a plugin row (avoids parsing manifests for non-plugin queries).
-				std::map<std::string, std::set<std::string>> pluginPasswordFields;
+				std::map<std::string, _tPluginSettingsFields> pluginFields;
 				{
 					bool hasPlugin = false;
 					for (const auto &sd : result)
 						if ((_eHardwareTypes)atoi(sd[3].c_str()) == HTYPE_PythonPlugin) { hasPlugin = true; break; }
 					if (hasPlugin)
-						pluginPasswordFields = BuildPluginPasswordFieldsByKey();
+						pluginFields = BuildPluginSettingsFieldsByKey();
 				}
 #endif
 				int ii = 0;
@@ -4771,11 +4793,11 @@ namespace http
 							// Strip password-type field values so secrets never reach the browser, and
 							// report which ones are set so the UI can show "leave blank to keep".
 							std::string pluginKey = sd[9]; // Extra holds the plugin key
-							auto itPwdFields = pluginPasswordFields.find(pluginKey);
-							if (itPwdFields != pluginPasswordFields.end())
+							auto itFields = pluginFields.find(pluginKey);
+							if (itFields != pluginFields.end())
 							{
 								Json::Value pwdSet(Json::objectValue);
-								for (const auto &field : itPwdFields->second)
+								for (const auto &field : itFields->second.passwordFields)
 								{
 									if (settingsJson.isMember(field))
 									{
@@ -4786,6 +4808,16 @@ namespace http
 								}
 								if (!pwdSet.empty())
 									root["result"][ii]["SettingsPwdSet"] = pwdSet;
+
+								// A field the manifest no longer declares (renamed or removed) may
+								// still hold a secret from an older version. Nothing can display
+								// it, so it never leaves the server; the next save drops it.
+								const std::vector<std::string> storedKeys = settingsJson.getMemberNames();
+								for (const auto &key : storedKeys)
+								{
+									if (itFields->second.allFields.count(key) == 0)
+										settingsJson.removeMember(key);
+								}
 							}
 #else
 							// Without Python support the plugin manifest is unavailable, so password
@@ -5762,6 +5794,7 @@ namespace http
 				root["error"] = "Could not write asset";
 				return;
 			}
+			WriteWebAssetGzip(szName, "UploadWebAsset");
 			WebAssetFetch::SetTitle(szName, szTitle);
 
 			root["status"] = "OK";
@@ -5839,6 +5872,10 @@ namespace http
 					continue;
 				if (!IsAllowedWebAssetType(szFileName))
 					continue;
+				// Libraries installed before pre-compression existed, or copied in by
+				// hand, get their .gz here so the first page load pays the cost once.
+				if (IsWebAssetStylesheet(szFileName) && !WebAssetGzipIsCurrent(szFileName))
+					WriteWebAssetGzip(szFileName, "GetWebAssets");
 				std::string szSourceURL;
 				std::string szLastUpdate;
 				std::string szTitle;
@@ -5894,6 +5931,7 @@ namespace http
 				root["error"] = "Could not remove asset";
 				return;
 			}
+			RemoveWebAssetGzip(szName);
 			WebAssetFetch::Forget(szName);
 			root["status"] = "OK";
 		}
@@ -6430,18 +6468,27 @@ namespace http
 			std::vector<std::string> strarray;
 			StringSplit(userdevices, ";", strarray);
 
-			// First make a backup of the favorite devices before deleting the devices for this user, then add the (new) onces and restore favorites
-			m_sql.safe_query("UPDATE SharedDevices SET SharedUserID = 0 WHERE SharedUserID == '%q' and Favorite == 1", idx.c_str());
+			// The list is rebuilt from scratch, so remember each device's favourite flag and
+			// dashboard position first. Losing [Order] here is what put the user's dashboard
+			// back in alphabetical order every time a device was added; devices that are new
+			// to the list get the next free position from the insert trigger.
+			std::map<std::string, std::pair<std::string, std::string>> previous; // DeviceRowID -> (Favorite, Order)
+			auto prevResult = m_sql.safe_query("SELECT DeviceRowID, Favorite, [Order] FROM SharedDevices WHERE (SharedUserID == '%q')", idx.c_str());
+			for (const auto& sd : prevResult)
+				previous[sd[0]] = std::make_pair(sd[1], sd[2]);
+
 			m_sql.safe_query("DELETE FROM SharedDevices WHERE SharedUserID == '%q'", idx.c_str());
 
-			int nDevices = static_cast<int>(strarray.size());
-			for (int ii = 0; ii < nDevices; ii++)
+			for (const auto& szDeviceRowID : strarray)
 			{
-				m_sql.safe_query("INSERT INTO SharedDevices (SharedUserID,DeviceRowID) VALUES ('%q','%q')", idx.c_str(), strarray[ii].c_str());
-				m_sql.safe_query("UPDATE SharedDevices SET Favorite = 1 WHERE SharedUserid == '%q' AND DeviceRowID IN (SELECT DeviceRowID FROM SharedDevices WHERE SharedUserID == 0)",
-					idx.c_str());
+				m_sql.safe_query("INSERT INTO SharedDevices (SharedUserID,DeviceRowID) VALUES ('%q','%q')", idx.c_str(), szDeviceRowID.c_str());
+				auto itt = previous.find(szDeviceRowID);
+				if (itt != previous.end())
+				{
+					m_sql.safe_query("UPDATE SharedDevices SET Favorite = %d, [Order] = %d WHERE (SharedUserID == '%q') AND (DeviceRowID == '%q')",
+						atoi(itt->second.first.c_str()), atoi(itt->second.second.c_str()), idx.c_str(), szDeviceRowID.c_str());
+				}
 			}
-			m_sql.safe_query("DELETE FROM SharedDevices WHERE SharedUserID == 0");
 			LoadUsers();
 			root["status"] = "OK";
 		}
@@ -6568,6 +6615,7 @@ namespace http
 			std::string sOptions = HTMLSanitizer::Sanitize(base64_decode(request::findValue(&req, "options")));
 			std::string devoptions = HTMLSanitizer::Sanitize(CURLEncode::URLDecode(request::findValue(&req, "devoptions")));
 			std::string EnergyMeterMode = CURLEncode::URLDecode(request::findValue(&req, "EnergyMeterMode"));
+			std::string sDisableAnomalyDetection = request::findValue(&req, "DisableAnomalyDetection");
 			std::string sShowIcon = request::findValue(&req, "ShowIcon");
 
 			char szTmp[200];
@@ -6771,11 +6819,13 @@ namespace http
 			}
 			bool bNeedShowIcon = (!sShowIcon.empty() && (sShowIcon == "0" || sShowIcon == "1") &&
 				atoi(result[0][0].c_str()) == pTypeGeneral && atoi(result[0][1].c_str()) == sTypeTextStatus);
-			if (!EnergyMeterMode.empty() || bNeedShowIcon)
+			if (!EnergyMeterMode.empty() || !sDisableAnomalyDetection.empty() || bNeedShowIcon)
 			{
 				auto options = m_sql.GetDeviceOptions(idx);
 				if (!EnergyMeterMode.empty())
 					options["EnergyMeterMode"] = EnergyMeterMode;
+				if (!sDisableAnomalyDetection.empty())
+					options["DisableAnomalyDetection"] = (sDisableAnomalyDetection == "1") ? "1" : "0";
 				if (bNeedShowIcon)
 					options["ShowIcon"] = sShowIcon;
 				uint64_t ullidx = std::stoull(idx);
@@ -7195,6 +7245,10 @@ namespace http
 				else if (Key == "WebTheme")
 				{
 					root["WebTheme"] = sValue;
+				}
+				else if (Key == "IconStyle")
+				{
+					root["IconStyle"] = nValue;
 				}
 				else if (Key == "MyDomoticzSubsystems")
 				{
