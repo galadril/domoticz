@@ -644,6 +644,16 @@ function Device(item) {
         if ((service == null) || (typeof this.iconItem == 'undefined')) return;
 
         var item = this.iconItem;
+        // A compound sensor is split into one device per value, and the splitter sets
+        // CustomImage as a flag meaning "build the image from Image" rather than as a
+        // custom icon index. Resolving with it would draw custom icon 1 for all of them,
+        // so it is cleared here and the per-value TypeImg decides the glyph instead.
+        if (item.SyntheticCustomImage == true) {
+            var probe = {};
+            for (var key in item) { if (item.hasOwnProperty(key)) probe[key] = item[key]; }
+            probe.CustomImage = 0;
+            item = probe;
+        }
         var device = this;
         var classFor = function (active) {
             var cls;
@@ -1612,6 +1622,10 @@ function Baro(item) {
         this.parent.constructor(item);
         if (this.name == 'Baro') this.name = 'Barometer';
         this.image = "images/baro48.png";
+        // Static artwork, so the glyph style may replace it. The base test marks the whole
+        // item value driven when it carries a Temp, which is true of every Temp+Hum+Baro
+        // sensor, and that would otherwise pin this barometer to its image for good.
+        this.valueDrivenIcon = false;
         this.LogLink = this.onClick = "window.location.href = '#/Devices/" + this.index + "/Log'";
         if (typeof item.Barometer != 'undefined') {
             this.data = this.smallStatus = item.Barometer + ' hPa';
@@ -1926,6 +1940,9 @@ function Humidity(item) {
     if (arguments.length != 0) {
         this.parent.constructor(item);
         this.image = "images/moisture48.png";
+        // Same as the barometer: one fixed image, not a reading, so it is free to become a
+        // glyph even though the sensor it belongs to also reports a temperature.
+        this.valueDrivenIcon = false;
         this.LogLink = this.onClick = "window.location.href = '#/Devices/" + this.index + "/Log'";
         if (typeof item.Humidity != 'undefined') {
             this.data = this.smallStatus = item.Humidity + '%';
