@@ -169,6 +169,9 @@ define(['app', 'icons/dzIconService'], function (app) {
                                     idx: parseInt(item.idx, 10) || 0,
                                     text: item.text || '',
                                     description: item.description || '',
+                                    // Kept so a tile can preview the glyph the resolver will
+                                    // actually draw for a built-in, instead of its PNG.
+                                    FaClass: item.FaClass || '',
                                     src: 'images/' + item.imageSrc + '48_On.png'
                                 };
                             })
@@ -575,8 +578,8 @@ define(['app', 'icons/dzIconService'], function (app) {
                                            ' \'dz-ip-tile-hl\': item.flat === $ctrl.highlight}"' +
                                            ' ng-click="$ctrl.pick(item)" ng-dblclick="$ctrl.confirm()" title="{{ item.title }}">' +
                                             '<span class="dz-ip-tile-icon">' +
-                                                '<i ng-if="item.kind === \'font\'" class="{{ item.cls }}"></i>' +
-                                                '<img ng-if="item.kind === \'img\'" ng-src="{{ item.src }}" alt="">' +
+                                                '<i ng-if="item.cls" class="{{ item.cls }}"></i>' +
+                                                '<img ng-if="!item.cls" ng-src="{{ item.src }}" alt="">' +
                                             '</span>' +
                                             '<span class="dz-ip-tile-name">{{ item.name }}</span>' +
                                         '</a>' +
@@ -761,10 +764,15 @@ define(['app', 'icons/dzIconService'], function (app) {
                         items: recentItems,
                         count: recentItems.length
                     });
-                    // The built-in set from switch_icons.txt is deliberately not offered:
-                    // every entry carries a FaClass, so the resolver draws a Font Awesome
-                    // glyph for it anyway and the Font Awesome source already lists all of
-                    // them. Uploads are different — no class can express one.
+                    list.push({
+                        id: 'builtin',
+                        kind: 'image',
+                        uploaded: false,
+                        title: 'Domoticz',
+                        glyph: 'fa-solid fa-house',
+                        count: imageNames(false).length
+                    });
+
                     var uploaded = imageNames(true);
                     if (uploaded.length) {
                         list.push({
@@ -887,18 +895,18 @@ define(['app', 'icons/dzIconService'], function (app) {
                 }
 
                 function initialSource() {
-                    var wanted = 'fa';
+                    var wanted = 'builtin';
 
                     if (vm.sel.on) {
                         wanted = vm.sel.provider === 'fa' ? 'fa' : 'lib-' + vm.sel.provider;
                     } else if (vm.sel.customImage >= 100) {
                         wanted = 'custom';
+                    } else if (vm.sel.customImage > 0) {
+                        wanted = 'builtin';
                     } else if (dzIconPickerData.recents().length) {
                         wanted = 'recent';
                     }
 
-                    // A device still on a built-in CustomImage has no source to open, since
-                    // that set is not offered; Font Awesome is where its replacement lives.
                     return sourceById(wanted) || vm.sources[0];
                 }
 
@@ -1126,6 +1134,12 @@ define(['app', 'icons/dzIconService'], function (app) {
                         kind: 'img',
                         idx: item.idx,
                         src: item.src,
+                        // Every built-in in switch_icons.txt carries a FaClass, and the
+                        // resolver renders that glyph rather than the PNG. Showing the PNG
+                        // here promised an icon the device would never display, so the tile
+                        // previews whatever picking it actually produces. kind stays 'img'
+                        // because the selection is still a CustomImage.
+                        cls: item.FaClass || '',
                         name: item.text || item.description || ('#' + item.idx),
                         title: item.description || item.text
                     };
