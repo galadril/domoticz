@@ -1223,8 +1223,14 @@ namespace WebAssetFetch
 			}
 		}
 
+		// Both run only once the metadata is known good: until then the backups are
+		// the way back, and a pre-compressed copy of a file we might still roll back
+		// would outlive the file it was made from.
 		for (const auto& cd : committed)
+		{
 			DiscardWebAssetBackup(cd.second);
+			WriteWebAssetGzip(cd.first, LOGTAG);
+		}
 
 		_log.Log(LOG_STATUS, "%s: stored '%s' with %d companion file(s), %d bytes", LOGTAG, szName.c_str(), static_cast<int>(ctx.assets.size()), static_cast<int>(ctx.totalSize));
 		return true;

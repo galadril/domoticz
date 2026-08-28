@@ -370,7 +370,7 @@ define(['angularAMD', 'app.routes', 'app.constants', 'app.notifications', 'app.p
     	template: '<section class="page-spinner">{{:: "Loading..." | translate }}</section>'
 	});
 
-	app.run(function ($rootScope, $location, $window, $route, $http, dzTimeAndSun, permissions, $uibModal) {
+	app.run(function ($rootScope, $location, $window, $route, $http, dzTimeAndSun, permissions, $uibModal, $timeout) {
 		var permissionList = {
 			isloggedin: false,
 			rights: -1,
@@ -410,6 +410,12 @@ define(['angularAMD', 'app.routes', 'app.constants', 'app.notifications', 'app.p
 
 			$.myglobals.DashboardType = $rootScope.config.DashboardType;
 			$.myglobals.enableDashboardDynamic = $rootScope.config.EnableTabDashboardDynamic;
+			// Icon style (Settings): the classic image icons by default, Font Awesome glyphs
+			// when chosen. The navigation bar carries both and CSS picks one by this class;
+			// dzIconService reads the same config value for the device icons. The class goes
+			// on <html>: several controllers reset the body's classes when their page loads.
+			$.myglobals.iconGlyphs = ($rootScope.config.IconStyle == 1);
+			document.documentElement.classList.toggle('dz-icons-glyph', $.myglobals.iconGlyphs);
 			$.myglobals.DateFormat = $rootScope.config.DateFormat;
 
 			if (typeof $rootScope.config.WindScale != 'undefined') {
@@ -451,6 +457,7 @@ define(['angularAMD', 'app.routes', 'app.constants', 'app.notifications', 'app.p
 			FiveMinuteHistoryDays: 1,
 			DashboardType: 1,
 			MobileType: 0,
+			IconStyle: 0,
 			TempScale: 1.0,
 			DegreeDaysBaseTemperature: 18.0,
 			PriceResolution: 60,
@@ -485,6 +492,7 @@ define(['angularAMD', 'app.routes', 'app.constants', 'app.notifications', 'app.p
 						$rootScope.config.FiveMinuteHistoryDays = data.FiveMinuteHistoryDays;
 						$rootScope.config.DashboardType = data.DashboardType;
 						$rootScope.config.MobileType = data.MobileType;
+						$rootScope.config.IconStyle = data.IconStyle;
 						$rootScope.config.TempScale = data.TempScale;
 						$rootScope.config.TempSign = data.TempSign;
 						$rootScope.config.WindScale = data.WindScale;
@@ -764,6 +772,25 @@ define(['angularAMD', 'app.routes', 'app.constants', 'app.notifications', 'app.p
 		});
 
 		var _tipsShown = false;
+		// Log pages build several Highcharts charts straight into their view; when the view is
+		// replaced those charts stayed registered in Highcharts.charts with their SVG, data and
+		// listeners. Once the new view is in place, destroy every chart whose container is no
+		// longer in the document. (Charts that manage their own teardown are already gone.)
+		function destroyDetachedCharts() {
+			if (!window.Highcharts || !window.Highcharts.charts) return;
+			window.Highcharts.charts.forEach(function (chart) {
+				if (chart && chart.renderTo && !document.contains(chart.renderTo)) {
+					try { chart.destroy(); } catch (e) { /* already torn down */ }
+				}
+			});
+		}
+		$rootScope.$on('$routeChangeSuccess', function () {
+			destroyDetachedCharts();
+			// a chart whose data arrives after the page was left renders into the old view;
+			// sweep once more when those requests have had time to finish
+			$timeout(destroyDetachedCharts, 5000, false);
+		});
+
 		$rootScope.$on('$routeChangeSuccess', function() {
 			if (_tipsShown) return;
 			var path = $location.path();
