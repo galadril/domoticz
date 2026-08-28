@@ -1126,6 +1126,12 @@ define(['app', 'icons/dzIconService'], function (app) {
                     });
                 }
 
+                // Mirrors dzIconService's own gate, so a tile can never promise something the
+                // resolver would not draw.
+                function glyphStyle() {
+                    return !!($rootScope.config && $rootScope.config.IconStyle == 1);
+                }
+
                 function imageTile(entry) {
                     var item = entry.item;
 
@@ -1134,12 +1140,11 @@ define(['app', 'icons/dzIconService'], function (app) {
                         kind: 'img',
                         idx: item.idx,
                         src: item.src,
-                        // Every built-in in switch_icons.txt carries a FaClass, and the
-                        // resolver renders that glyph rather than the PNG. Showing the PNG
-                        // here promised an icon the device would never display, so the tile
-                        // previews whatever picking it actually produces. kind stays 'img'
-                        // because the selection is still a CustomImage.
-                        cls: item.FaClass || '',
+                        // A tile shows what picking it will actually produce, which depends on
+                        // Settings > Icon style: the glyph style stands the FaClass from
+                        // switch_icons.txt in for a built-in, the classic style keeps the PNG.
+                        // kind stays 'img' either way — the selection is still a CustomImage.
+                        cls: glyphStyle() ? (item.FaClass || '') : '',
                         name: item.text || item.description || ('#' + item.idx),
                         title: item.description || item.text
                     };
